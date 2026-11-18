@@ -91,6 +91,10 @@ class Panel(Gtk.ApplicationWindow):
 
     def on_submit(self, entry):
         text = entry.get_text().strip()
+        if text == "/reload":
+            entry.set_text("")
+            self.reload_settings()
+            return
         if not text or self.busy or (not self.key and config.requires_api_key(self.cfg)):
             return
         entry.set_text("")
@@ -100,6 +104,21 @@ class Panel(Gtk.ApplicationWindow):
         self.append("\nai\n", "ai")
         self.history.append({"role": "user", "content": text})
         threading.Thread(target=self.worker, args=(text,), daemon=True).start()
+
+    def reload_settings(self):
+        """Re-read config.toml and the API key, rebuild the agent, and refresh the UI."""
+        new_cfg = config.load()
+        new_key = config.load_api_key(new_cfg)
+        self.cfg = new_cfg
+        self.key = new_key
+        self.toolbox = Toolbox(self.confirm, new_cfg.command_timeout)
+        self.agent = Agent(new_cfg, new_key, self.toolbox)
+        self.append(f"\n[config reloaded] model: {new_cfg.model} @ {new_cfg.base_url}\n", "tool")
+        for w in new_cfg.warnings:
+            self.append(f"config: {w}\n", "err")
+        if not new_key and config.requires_api_key(new_cfg):
+            self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
+        self.entry.grab_focus()
 
     def worker(self, text):
         def ui(fn, *a):
