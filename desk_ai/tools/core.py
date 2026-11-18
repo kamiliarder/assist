@@ -1,0 +1,110 @@
+"""Shared helpers and the Toolbox core (registration + dispatch)."""
+import pathlib
+
+from . import apps, command, fileops, media, web, windows
+from .env import _run
+
+from .env import LEAKY_ENV  # noqa: F401  (re-exported for backwards compatibility)
+
+
+def _tool(name, desc, props=None, required=None):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": desc,
+            "parameters": {"type": "object", "properties": props or {}, "required": required or []},
+        },
+    }
+
+
+class Toolbox:
+    """`confirm(text) -> bool` is called from a worker thread and may block until answered."""
+
+    def __init__(self, confirm, command_timeout=30):
+        self.confirm = confirm
+        self.command_timeout = command_timeout
+        self._impls = {}
+        self.schemas = []
+        roots = [pathlib.Path.home()]
+        self.fileops = fileops.FileOps(roots=roots, confirm=self.confirm)
+        self._bind_methods()
+        self._register()
+
+    def _register(self):
+        self._impls.update({
+            "list_windows": self.list_windows,
+            "focus_window": self.focus_window,
+            "open_app": self.open_app,
+            "media": self.media,
+            "run_command": self.run_command,
+            "read_file": self.read_file,
+            "edit_file": self.edit_file,
+            "write_file": self.write_file,
+            "web_open": self.web_open,
+            "web_search": self.web_search,
+        })
+        self.schemas.extend([
+            _tool("list_windows", "List open windows (id, title, app_id)."),
+            _tool("focus_window", "Focus a window by id from list_windows.",
+                  {"id": {"type": "integer"}}, ["id"]),
+            _tool("open_app", "Launch an installed GUI application by its display name, e.g. 'Firefox'.",
+                  {"name": {"type": "string"}}, ["name"]),
+            _tool("media", "Control the active MPRIS media player.",
+                  {"action": {"type": "string",
+                              "enum": ["play-pause", "next", "previous", "status", "now-playing"]}},
+                  ["action"]),
+            _tool("run_command",
+                  "Run a shell command on the user's machine. The user must approve each command. "
+                  "Use detach=true for long-running or GUI programs.",
+                  {"command": {"type": "string"}, "detach": {"type": "boolean"}}, ["command"]),
+            _tool("read_file",
+                  "Read part or all of a text file. Returns the requested line range.",
+                  {"file_path": {"type": "string"},
+                   "start_line": {"type": "integer"},
+                   "end_line": {"type": "integer"}}, ["file_path"]),
+            _tool("edit_file",
+                  "Replace an exact snippet in an existing file. search_block must match the file "
+                  "verbatim (indentation, whitespace, line breaks).",
+                  {"file_path": {"type": "string"},
+                   "search_block": {"type": "string"},
+                   "replace_block": {"type": "string"}}, ["file_path", "search_block"]),
+            _tool("write_file",
+                  "Create a new file, or rewrite an existing small file (< 50 lines). "
+                  "For larger existing files use read_file + edit_file instead.",
+                  {"file_path": {"type": "string"},
+                   "content": {"type": "string"}}, ["file_path", "content"]),
+            _tool("web_open", "Open a URL in Firefox.",
+                  {"url": {"type": "string"}}, ["url"]),
+            _tool("web_search", "Search the web in Firefox.",
+                  {"query": {"type": "string"}}, ["query"]),
+        ])
+
+    def _bind_methods(self):
+        for mod in (windows, apps, media, command):
+            for name in ("list_windows", "focus_window", "open_app", "media", "run_command"):
+                fn = getattr(mod, name, None)
+                if fn is not None:
+                    setattr(self, name, fn.__get__(self, Toolbox))
+        for name in ("read_file", "edit_file", "write_file"):
+            fn = getattr(self.fileops, name, None)
+            if fn is not None:
+                setattr(self, name, fn)
+        for name in ("open", "search"):
+            fn = getattr(web, name, None)
+            if fn is not None:
+                setattr(self, "web_" + name, fn.__get__(self, Toolbox))
+
+    def names(self):
+        return list(self._impls)
+
+    def call(self, name, args):
+        fn = self._impls.get(name)
+        if fn is None:
+            return f"error: unknown tool '{name}'. Available tools: {', '.join(self._impls)}"
+        try:
+            return str(fn(**args))
+        except TypeError as e:
+            return f"error: bad arguments for {name}: {e}"
+        except Exception:  # noqa: BLE001
+            return f"error: unknown tool error"
