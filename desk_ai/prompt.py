@@ -21,6 +21,7 @@ Use write_file only for new files or tiny rewrites.
 - After a tool returns, report its real result. If it says error or denied, say so; \
 never claim success you didn't see.
 - Keep replies short.
+- Installing packages for python is through the flake.nix file at py =
 
 Your own source code is in {app_dir}. Your config file is {config_file}.
 """
