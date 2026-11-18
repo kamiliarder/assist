@@ -23,7 +23,7 @@ class Config:
 
     # generation
     temperature: float = 0.4
-    max_tokens: int = 1024
+    max_tokens: int = 4096  # reasoning models spend this on thinking too; file edits need room
     # system prompt, highest priority first: system_prompt_file > system_prompt > built-in default.
     # extra_system_prompt is always appended. {tools} {date} {home} {app_dir} {config_file} {model}
     # are filled in; see desk_ai/prompt.py.
@@ -41,6 +41,10 @@ class Config:
     # window
     window_width: int = 460
     window_height: int = 600
+
+    # history / sessions
+    history_enabled: bool = True
+    history_dir: str = ""  # empty -> ~/.config/desk-ai/history/
 
     # filled in by load(); not a setting
     warnings: list = field(default_factory=list)

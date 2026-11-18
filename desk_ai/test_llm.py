@@ -23,6 +23,30 @@ def tool_call(name, args, call_id="call_1"):
                                 "function": {"name": name, "arguments": json.dumps(args)}}]})
 
 
+def raw(*chunks, done=True):
+    """A 200 SSE response made of arbitrary chunks (finish reasons, errors, reasoning...)."""
+    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
+    return 200, body + ("data: [DONE]\n\n" if done else "")
+
+
+def finish(reason):
+    return {"choices": [{"delta": {}, "finish_reason": reason}]}
+
+
+def reasoning(s):
+    return {"choices": [{"delta": {"reasoning_content": s}}]}
+
+
+def content(s):
+    return {"choices": [{"delta": {"content": s}}]}
+
+
+def raw_tool_call(name, arguments, call_id="call_1"):
+    """Tool call whose `arguments` is sent verbatim (so it can be truncated/invalid JSON)."""
+    return {"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": call_id, "function": {"name": name, "arguments": arguments}}]}}]}
+
+
 class FakeProvider:
     """Plays back scripted (status, body) responses and records request payloads."""
 
@@ -195,6 +219,109 @@ class AgentTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as cm:
             self.run_turn(agent, [{"role": "user", "content": "hi"}])
         self.assertIn("could not reach http://127.0.0.1:1/v1", str(cm.exception))
+
+    # -- blank replies: every silent failure must become a retry or a clear error
+
+    def test_max_tokens_exhausted_by_reasoning_is_a_clear_error_not_a_blank(self):
+        provider, _, agent = self.make([raw(reasoning("hmm, thinking"), finish("length"))])
+        history = [{"role": "user", "content": "write a file"}]
+        with self.assertRaises(ProviderError) as cm:
+            self.run_turn(agent, history)
+        self.assertIn("max_tokens", str(cm.exception))
+        self.assertIn("while reasoning", str(cm.exception))
+        self.assertEqual(len(provider.requests), 1)  # retrying the same cap is pointless
+        self.assertEqual(len(history), 1)            # no empty assistant message left behind
+
+    def test_length_without_reasoning_does_not_claim_reasoning(self):
+        _, _, agent = self.make([raw(finish("length"))])
+        with self.assertRaises(ProviderError) as cm:
+            self.run_turn(agent, [{"role": "user", "content": "x"}])
+        self.assertIn("max_tokens", str(cm.exception))
+        self.assertNotIn("reasoning", str(cm.exception))
+
+    def test_error_event_inside_a_200_stream_is_retried(self):
+        msg = "content safety screening is temporarily unavailable"
+        provider, _, agent = self.make([raw({"error": {"message": msg}}), text("ok")])
+        out, status = self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(provider.requests), 2)
+        self.assertIn("content safety", status)
+
+    def test_persistent_error_event_surfaces_its_message(self):
+        _, _, agent = self.make([raw({"error": {"message": "boom"}})] * 2, max_attempts=2)
+        with self.assertRaises(ProviderError) as cm:
+            self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertIn("boom", str(cm.exception))
+
+    def test_empty_reply_is_retried_and_never_enters_history(self):
+        provider, _, agent = self.make([raw(finish("stop")), text("hello")])
+        history = [{"role": "user", "content": "hi"}]
+        out, _ = self.run_turn(agent, history)
+        self.assertEqual(out, "hello")
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual([m["role"] for m in history], ["user", "assistant"])
+        self.assertEqual(history[1]["content"], "hello")
+
+    def test_persistent_empty_reply_raises_and_leaves_history_alone(self):
+        _, _, agent = self.make([raw(finish("stop"))] * 2, max_attempts=2)
+        history = [{"role": "user", "content": "hi"}]
+        with self.assertRaises(ProviderError) as cm:
+            self.run_turn(agent, history)
+        self.assertIn("empty reply", str(cm.exception))
+        self.assertEqual(len(history), 1)
+
+    def test_connection_drop_before_any_output_is_retried(self):
+        provider, _, agent = self.make([raw(done=False), text("ok")])
+        out, _ = self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertEqual(out, "ok")
+        self.assertEqual(len(provider.requests), 2)
+
+    def test_connection_drop_after_partial_output_is_an_error_not_silence(self):
+        _, _, agent = self.make([raw(content("I'll add a reload"), done=False)])
+        out, history = [], [{"role": "user", "content": "hi"}]
+        with mock.patch("desk_ai.llm.time.sleep"), self.assertRaises(ProviderError) as cm:
+            agent.run_turn(history, out.append, lambda s: None)
+        self.assertIn("ended early", str(cm.exception))
+        self.assertEqual("".join(out), "I'll add a reload")  # what arrived was still shown
+        self.assertEqual(len(history), 1)                    # but the cut-off reply isn't kept
+
+    def test_cut_off_visible_reply_gets_a_note_that_is_not_stored(self):
+        _, _, agent = self.make([raw(content("partial answer"), finish("length"))])
+        history = [{"role": "user", "content": "hi"}]
+        out, _ = self.run_turn(agent, history)
+        self.assertIn("partial answer", out)
+        self.assertIn("cut off at max_tokens", out)
+        self.assertEqual(history[-1]["content"], "partial answer")
+
+    def test_truncated_tool_arguments_are_not_run_and_the_model_is_told(self):
+        _, toolbox, agent = self.make([
+            raw(raw_tool_call("echo", '{"text": "a very long file conte'), finish("length")),
+            text("sorry, retrying smaller"),
+        ])
+        history = [{"role": "user", "content": "write a file"}]
+        out, status = self.run_turn(agent, history)
+        self.assertEqual(toolbox.calls, [])  # not run with guessed/empty arguments
+        self.assertIn("unreadable arguments", status)
+        self.assertIn("not valid JSON", history[2]["content"])
+        self.assertIn("sorry, retrying smaller", out)
+
+    def test_non_object_tool_arguments_are_rejected(self):
+        _, toolbox, agent = self.make([raw(raw_tool_call("echo", "[1, 2]")), text("ok")])
+        history = [{"role": "user", "content": "x"}]
+        self.run_turn(agent, history)
+        self.assertEqual(toolbox.calls, [])
+        self.assertIn("not valid JSON", history[2]["content"])
+
+    def test_debug_env_prints_a_one_line_summary_to_stderr(self):
+        import contextlib
+        import io
+        import os
+        _, _, agent = self.make([raw(reasoning("t"), content("hi"), finish("stop"))])
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"DESK_AI_DEBUG": "1"}), contextlib.redirect_stderr(err):
+            self.run_turn(agent, [{"role": "user", "content": "x"}])
+        self.assertIn("finish=stop", err.getvalue())
+        self.assertIn("reasoning=True", err.getvalue())
 
 
 if __name__ == "__main__":

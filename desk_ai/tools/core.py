@@ -35,6 +35,13 @@ class Toolbox:
         self._impls.update({
             "list_windows": self.list_windows,
             "focus_window": self.focus_window,
+            "focus_workspace_down": self.focus_workspace_down,
+            "focus_workspace_up": self.focus_workspace_up,
+            "focus_workspace": self.focus_workspace,
+            "focus_workspace_previous": self.focus_workspace_previous,
+            "center_window": self.center_window,
+            "fullscreen_window": self.fullscreen_window,
+            "switch_preset_window_width": self.switch_preset_window_width,
             "open_app": self.open_app,
             "media": self.media,
             "run_command": self.run_command,
@@ -49,6 +56,17 @@ class Toolbox:
             _tool("list_windows", "List open windows (id, title, app_id)."),
             _tool("focus_window", "Focus a window by id from list_windows.",
                   {"id": {"type": "integer"}}, ["id"]),
+            _tool("focus_workspace_down", "Focus the workspace below (niri: FocusWorkspaceDown)."),
+            _tool("focus_workspace_up", "Focus the workspace above (niri: FocusWorkspaceUp)."),
+            _tool("focus_workspace", "Focus a workspace by index (niri: FocusWorkspace).",
+                  {"index": {"type": "integer"}}, ["index"]),
+            _tool("focus_workspace_previous", "Focus the previous workspace (niri: FocusWorkspacePrevious)."),
+            _tool("center_window", "Center a window on the screen (niri: CenterWindow).",
+                  {"id": {"type": "integer"}}),
+            _tool("fullscreen_window", "Toggle fullscreen on a window (niri: FullscreenWindow).",
+                  {"id": {"type": "integer"}}),
+            _tool("switch_preset_window_width", "Switch between preset window widths (niri: SwitchPresetWindowWidth).",
+                  {"id": {"type": "integer"}}),
             _tool("open_app", "Launch an installed GUI application by its display name, e.g. 'Firefox'.",
                   {"name": {"type": "string"}}, ["name"]),
             _tool("media", "Control the active MPRIS media player.",
@@ -85,7 +103,10 @@ class Toolbox:
 
     def _bind_methods(self):
         for mod in (windows, apps, media, command):
-            for name in ("list_windows", "focus_window", "open_app", "media", "run_command"):
+            for name in ("list_windows", "focus_window", "open_app", "media", "run_command",
+                         "focus_workspace_down", "focus_workspace_up", "focus_workspace",
+                         "focus_workspace_previous", "center_window", "fullscreen_window",
+                         "switch_preset_window_width"):
                 fn = getattr(mod, name, None)
                 if fn is not None:
                     setattr(self, name, fn.__get__(self, Toolbox))

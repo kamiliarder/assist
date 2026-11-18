@@ -7,7 +7,8 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
 from . import config  # noqa: E402
-from .llm import Agent  # noqa: E402
+from .history import HistoryStore  # noqa: E402
+from .llm import Agent, CancelledError  # noqa: E402
 from .tools import Toolbox  # noqa: E402
 
 CSS = b"""
@@ -21,9 +22,11 @@ class Panel(Gtk.ApplicationWindow):
         super().__init__(application=app, title="desk-ai")
         self.cfg = cfg
         self.key = key
-        self.history = []
         self.busy = False
         self._pending = None
+        self._cancel = threading.Event()
+        self.store = HistoryStore(cfg.history_enabled, cfg.history_dir)
+        self.store.new_session()
         self.toolbox = Toolbox(self.confirm, cfg.command_timeout)
         self.agent = Agent(cfg, key, self.toolbox)
 
@@ -68,6 +71,13 @@ class Panel(Gtk.ApplicationWindow):
         self.entry.connect("activate", self.on_submit)
         box.append(self.entry)
 
+        # Cancel button (shown only while a turn is running)
+        self.cancel_btn = Gtk.Button(label="Cancel")
+        self.cancel_btn.add_css_class("destructive-action")
+        self.cancel_btn.set_visible(False)
+        self.cancel_btn.connect("clicked", lambda _b: self._cancel.set())
+        box.append(self.cancel_btn)
+
         self.append(f"model: {cfg.model} @ {cfg.base_url}\n", "tool")
         for w in cfg.warnings:
             self.append(f"config: {w}\n", "err")
@@ -95,15 +105,26 @@ class Panel(Gtk.ApplicationWindow):
             entry.set_text("")
             self.reload_settings()
             return
+        if text == "/prev-session":
+            entry.set_text("")
+            prev = self.store.switch_previous()
+            if prev is None:
+                self.append("\n[no previous session]\n", "tool")
+            else:
+                self.append(f"\n[switched to session: {prev['name']}]\n", "tool")
+                self.append(f"({len(prev.get('messages', []))} messages)\n", "tool")
+            return
         if not text or self.busy or (not self.key and config.requires_api_key(self.cfg)):
             return
         entry.set_text("")
         self.busy = True
+        self._cancel.clear()
+        self.cancel_btn.set_visible(True)
         self.append("\nyou\n", "you")
         self.append(f"{text}\n")
         self.append("\nai\n", "ai")
-        self.history.append({"role": "user", "content": text})
-        threading.Thread(target=self.worker, args=(text,), daemon=True).start()
+        self.store.append({"role": "user", "content": text})
+        threading.Thread(target=self.worker, args=(text, self._cancel), daemon=True).start()
 
     def reload_settings(self):
         """Re-read config.toml and the API key, rebuild the agent, and refresh the UI."""
@@ -120,31 +141,36 @@ class Panel(Gtk.ApplicationWindow):
             self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
         self.entry.grab_focus()
 
-    def worker(self, text):
+    def worker(self, text, cancel):
         def ui(fn, *a):
             GLib.idle_add(lambda: fn(*a) or False)
 
-        mark = len(self.history) - 1  # index of this turn's user message
+        msgs = self.store.messages()
+        mark = len(msgs) - 1  # index of this turn's user message
         try:
-            self.agent.run_turn(self.history,
+            self.agent.run_turn(msgs, cancel,
                                 on_text=lambda t: ui(self.append, t),
                                 on_status=lambda s: ui(self.append, s, "tool"),
                                 on_pause=lambda r: self.confirm_pause(r))
+        except CancelledError:
+            ui(self.append, "\n[cancelled]\n", "tool")
         except Exception as e:  # noqa: BLE001
             ui(self.append, f"\n[error] {e}\n", "err")
-            if len(self.history) == mark + 1:
+            if len(msgs) == mark + 1:
                 # Failed before anything happened: drop the dangling message and
                 # put the text back so you can just press Enter again.
-                del self.history[mark:]
+                self.store.truncate_after(mark)
                 ui(self.entry.set_text, text)
             else:
                 ui(self.append, "(a tool already ran this turn, so your message was kept)\n", "tool")
         finally:
             ui(self.append, "\n")
+            self.store.save()
             ui(self.finish)
 
     def finish(self):
         self.busy = False
+        self.cancel_btn.set_visible(False)
         self.entry.grab_focus()
 
     # -- approval flow (called from the worker thread)

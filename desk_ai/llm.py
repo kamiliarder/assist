@@ -1,6 +1,8 @@
 """LLM client (OpenAI-compatible, streaming) and the tool-calling agent loop. No GTK in here."""
 import json
+import os
 import random
+import sys
 import time
 
 import httpx
@@ -8,6 +10,10 @@ import httpx
 from . import prompt
 
 RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+class CancelledError(Exception):
+    """Raised when the user cancels an in-flight turn."""
 
 
 class ProviderError(Exception):
@@ -31,7 +37,7 @@ class Agent:
 
     # -- one streamed request
 
-    def _stream_once(self, model, messages, on_text, state):
+    def _stream_once(self, model, messages, on_text, state, cancel=None):
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": self.system}] + messages,
@@ -44,6 +50,7 @@ class Agent:
         if self.key:  # local servers (ollama etc.) usually need none
             headers["Authorization"] = f"Bearer {self.key}"
         content, calls = "", {}
+        finish, saw_done, saw_reasoning = None, False, False
         timeout = httpx.Timeout(30.0, read=120.0)
         with httpx.stream("POST", f"{self.cfg.base_url}/chat/completions", json=payload,
                           headers=headers, timeout=timeout) as r:
@@ -62,12 +69,25 @@ class Agent:
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    saw_done = True
                     break
+                if cancel is not None and cancel.is_set():
+                    raise CancelledError("cancelled by user")
                 chunk = json.loads(data)
+                if chunk.get("error") and not chunk.get("choices"):
+                    # providers can report a failure *inside* a 200 stream; don't swallow it
+                    err = chunk["error"]
+                    detail = err.get("message") if isinstance(err, dict) else err
+                    raise ProviderError(f"provider error mid-stream: {detail}", retryable=True)
                 if not chunk.get("choices"):
                     continue
-                delta = chunk["choices"][0].get("delta", {})
-                # reasoning models may send delta["reasoning_content"]; we ignore it
+                choice = chunk["choices"][0]
+                finish = choice.get("finish_reason") or finish
+                delta = choice.get("delta") or {}
+                # reasoning models stream their thinking separately; we don't show it, but we
+                # note it, because it counts against max_tokens and can use the whole budget
+                if delta.get("reasoning_content") or delta.get("reasoning"):
+                    saw_reasoning = True
                 if delta.get("content"):
                     state["started"] = True
                     content += delta["content"]
@@ -83,6 +103,26 @@ class Agent:
                         c["function"]["name"] += fn["name"]
                     if fn.get("arguments"):
                         c["function"]["arguments"] += fn["arguments"]
+        if os.environ.get("DESK_AI_DEBUG"):
+            print(f"[desk-ai] model={model} finish={finish} content_chars={len(content)} "
+                  f"tool_calls={len(calls)} reasoning={saw_reasoning} done={saw_done}",
+                  file=sys.stderr)
+        if not (saw_done or finish):
+            raise ProviderError("the stream ended early (connection dropped?)", retryable=True)
+        if finish == "content_filter":
+            raise ProviderError("the provider's content filter blocked this reply")
+        if not content and not calls:
+            if finish == "length":
+                during = " while reasoning" if saw_reasoning else ""
+                raise ProviderError(
+                    f"the reply hit max_tokens ({self.cfg.max_tokens}) before any output{during}; "
+                    "raise max_tokens in config.toml")
+            # A blank reply is never useful, and must not enter the history.
+            raise ProviderError(
+                f"the model returned an empty reply (finish_reason={finish or 'none'})",
+                retryable=True)
+        if finish == "length":
+            on_text(f"\n[output cut off at max_tokens={self.cfg.max_tokens}]\n")
         msg = {"role": "assistant", "content": content or None}
         if calls:
             msg["tool_calls"] = [calls[i] for i in sorted(calls)]
@@ -90,7 +130,7 @@ class Agent:
 
     # -- retry / fallback
 
-    def _chat(self, messages, on_text, on_status):
+    def _chat(self, messages, on_text, on_status, cancel=None):
         """Retries transient errors with backoff, then falls back to other models.
 
         Only retries if no output has been shown yet, so a retry never duplicates text.
@@ -101,7 +141,7 @@ class Agent:
             for attempt in range(1, self.cfg.max_attempts + 1):
                 state = {"started": False}
                 try:
-                    return self._stream_once(model, messages, on_text, state)
+                    return self._stream_once(model, messages, on_text, state, cancel)
                 except (ProviderError, httpx.TransportError) as e:
                     retryable = e.retryable if isinstance(e, ProviderError) else True
                     if state["started"] or not retryable:
@@ -111,7 +151,8 @@ class Agent:
                         break
                     delay = getattr(e, "retry_after", None) or min(2 ** (attempt - 1), 8)
                     delay += random.uniform(0, 0.5)
-                    on_status(f"\n… provider error, retrying in {delay:.0f}s "
+                    reason = (str(e) or type(e).__name__)[:100]
+                    on_status(f"\n… {reason}; retrying in {delay:.0f}s "
                               f"({attempt}/{self.cfg.max_attempts})\n")
                     time.sleep(delay)
             if mi + 1 < len(models):
@@ -122,7 +163,7 @@ class Agent:
 
     # -- agent loop
 
-    def run_turn(self, history, on_text, on_status, on_pause=None):
+    def run_turn(self, history, cancel=None, on_text=None, on_status=None, on_pause=None):
         """model -> tools -> model, without a hard limit.
 
         `on_pause(rounds)` is called every `cfg.tool_round_warn_every` tool
@@ -138,7 +179,7 @@ class Agent:
             if self.cfg.max_tool_rounds and rounds >= self.cfg.max_tool_rounds:
                 on_text(f"\n(stopped after {rounds} tool rounds)\n")
                 return
-            msg = self._chat(history, on_text, on_status)
+            msg = self._chat(history, on_text, on_status, cancel)
             history.append(msg)
             if not msg.get("tool_calls"):
                 return
@@ -146,10 +187,17 @@ class Agent:
                 name = tc["function"]["name"]
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                on_status(f"\n⚙ {name} {json.dumps(args)}\n")
-                result = self.toolbox.call(name, args)
+                    if not isinstance(args, dict):
+                        raise ValueError("arguments must be a JSON object")
+                except ValueError:  # includes JSONDecodeError
+                    # Usually output cut off mid-call. Don't run the tool with guessed arguments.
+                    on_status(f"\n⚙ {name} (unreadable arguments)\n")
+                    result = (f"error: the arguments for {name} were not valid JSON, so nothing was "
+                              "run. The output was probably cut off (max_tokens); retry with a "
+                              "smaller change.")
+                else:
+                    on_status(f"\n⚙ {name} {json.dumps(args)}\n")
+                    result = self.toolbox.call(name, args)
                 first = result.splitlines()[0] if result else ""
                 on_status(f"→ {first[:200]}\n")
                 history.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
