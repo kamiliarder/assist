@@ -5,7 +5,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
 from . import config  # noqa: E402
 from .ui import CSS, Panel  # noqa: E402
@@ -26,6 +26,12 @@ class App(Gtk.Application):
             self.panel = Panel(self, cfg, config.load_api_key(cfg))
         self.panel.present()
         self.panel.entry.grab_focus()
+
+        # Reload settings without restarting: <Ctrl>R or /reload in the entry.
+        action = Gio.SimpleAction.new("reload", None)
+        action.connect("activate", lambda _a, _p: self.panel.reload_settings())
+        self.add_action(action)
+        self.set_accels_for_action("app.reload", ["<Ctrl>R"])
 
 
 def print_config():
