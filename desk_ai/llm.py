@@ -5,6 +5,8 @@ import time
 
 import httpx
 
+from . import prompt
+
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -15,29 +17,17 @@ class ProviderError(Exception):
         self.retry_after = retry_after
 
 
-def build_system(tool_names, extra=""):
-    text = (
-        "You are a concise desktop assistant on a NixOS machine running the niri Wayland compositor.\n"
-        f"You can act through these tools: {', '.join(tool_names)}. "
-        "Never guess other tool names.\n"
-        "Rules:\n"
-        "- To launch a GUI app, use open_app.\n"
-        "- To run a command the user asks for, use run_command with exactly that command.\n"
-        "- If no tool fits the request, say plainly what you can't do and suggest the closest option.\n"
-        "- After a tool returns, report its real result. If it says error or denied, say so; "
-        "never claim success you didn't see.\n"
-        "Keep replies short."
-        "Your own configurations are placed at ~/Projects/assist/"
-    )
-    return f"{text}\n\n{extra.strip()}" if extra.strip() else text
-
-
 class Agent:
     def __init__(self, cfg, key, toolbox):
         self.cfg = cfg
         self.key = key
         self.toolbox = toolbox
-        self.system = build_system(toolbox.names(), cfg.extra_system_prompt)
+        self._prompt_warning = None
+
+    @property
+    def system(self):
+        """Built fresh each time, so edits to system_prompt_file apply on the next request."""
+        return prompt.build(self.cfg, self.toolbox.names())[0]
 
     # -- one streamed request
 
@@ -50,7 +40,9 @@ class Agent:
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
         }
-        headers = {"Authorization": f"Bearer {self.key}", "Accept": "text/event-stream"}
+        headers = {"Accept": "text/event-stream"}
+        if self.key:  # local servers (ollama etc.) usually need none
+            headers["Authorization"] = f"Bearer {self.key}"
         content, calls = "", {}
         timeout = httpx.Timeout(30.0, read=120.0)
         with httpx.stream("POST", f"{self.cfg.base_url}/chat/completions", json=payload,
@@ -58,7 +50,7 @@ class Agent:
             if r.status_code != 200:
                 r.read()
                 hint = {401: " (check your API key)",
-                        404: f" (model '{model}' not found?)"}.get(r.status_code, "")
+                        404: f" (model '{model}' not found, or wrong base_url {self.cfg.base_url}?)"}.get(r.status_code, "")
                 ra = r.headers.get("retry-after", "")
                 raise ProviderError(
                     f"HTTP {r.status_code}{hint}: {r.text[:300]}",
@@ -124,6 +116,8 @@ class Agent:
                     time.sleep(delay)
             if mi + 1 < len(models):
                 on_status(f"\n… switching to fallback model {models[mi + 1]}\n")
+        if isinstance(last, httpx.TransportError):
+            raise ProviderError(f"could not reach {self.cfg.base_url}: {last}") from last
         raise last
 
     # -- agent loop
@@ -134,6 +128,11 @@ class Agent:
         `on_pause(rounds)` is called every `cfg.tool_round_warn_every` tool
         runs; return False (or raise) to stop the turn, True to resume.
         """
+        warning = prompt.build(self.cfg, self.toolbox.names())[1]
+        if warning != self._prompt_warning:  # report a bad system_prompt_file once, not every turn
+            self._prompt_warning = warning
+            if warning:
+                on_status(f"\n⚠ {warning}\n")
         rounds = 0
         while True:
             if self.cfg.max_tool_rounds and rounds >= self.cfg.max_tool_rounds:

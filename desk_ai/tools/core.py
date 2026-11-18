@@ -43,6 +43,7 @@ class Toolbox:
             "write_file": self.write_file,
             "web_open": self.web_open,
             "web_search": self.web_search,
+            "web_read": self.web_read,
         })
         self.schemas.extend([
             _tool("list_windows", "List open windows (id, title, app_id)."),
@@ -78,6 +79,8 @@ class Toolbox:
                   {"url": {"type": "string"}}, ["url"]),
             _tool("web_search", "Search the web in Firefox.",
                   {"query": {"type": "string"}}, ["query"]),
+            _tool("web_read", "Fetch a URL and return its text content.",
+                  {"url": {"type": "string"}}, ["url"]),
         ])
 
     def _bind_methods(self):
@@ -90,7 +93,7 @@ class Toolbox:
             fn = getattr(self.fileops, name, None)
             if fn is not None:
                 setattr(self, name, fn)
-        for name in ("open", "search"):
+        for name in ("open", "search", "read"):
             fn = getattr(web, name, None)
             if fn is not None:
                 setattr(self, "web_" + name, fn.__get__(self, Toolbox))
@@ -106,5 +109,6 @@ class Toolbox:
             return str(fn(**args))
         except TypeError as e:
             return f"error: bad arguments for {name}: {e}"
-        except Exception:  # noqa: BLE001
-            return f"error: unknown tool error"
+        except Exception as e:  # noqa: BLE001
+            # The model can only fix what it can see (e.g. "search_block appears 3 times").
+            return f"error: {e or type(e).__name__}"

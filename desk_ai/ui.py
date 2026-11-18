@@ -6,6 +6,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
+from . import config  # noqa: E402
 from .llm import Agent  # noqa: E402
 from .tools import Toolbox  # noqa: E402
 
@@ -67,10 +68,10 @@ class Panel(Gtk.ApplicationWindow):
         self.entry.connect("activate", self.on_submit)
         box.append(self.entry)
 
-        self.append(f"model: {cfg.model}\n", "tool")
+        self.append(f"model: {cfg.model} @ {cfg.base_url}\n", "tool")
         for w in cfg.warnings:
             self.append(f"config: {w}\n", "err")
-        if not key:
+        if not key and config.requires_api_key(cfg):
             self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
 
     # -- UI helpers (main thread only)
@@ -90,7 +91,7 @@ class Panel(Gtk.ApplicationWindow):
 
     def on_submit(self, entry):
         text = entry.get_text().strip()
-        if not text or self.busy or not self.key:
+        if not text or self.busy or (not self.key and config.requires_api_key(self.cfg)):
             return
         entry.set_text("")
         self.busy = True

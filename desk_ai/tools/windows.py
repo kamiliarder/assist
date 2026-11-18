@@ -12,3 +12,7 @@ def list_windows(self):
 
 def focus_window(self, id):
     return _run(["niri", "msg", "action", "focus-window", "--id", str(int(id))]) or "ok"
+
+
+def close_window(self, id):
+    return _run(["niri", "msg", "action", "close-window", "--id", str(int(id))]) or "ok"

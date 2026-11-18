@@ -29,12 +29,14 @@ class FakeProvider:
     def __init__(self, script):
         self.script = list(script)
         self.requests = []
+        self.headers = []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 n = int(self.headers["Content-Length"])
                 outer.requests.append(json.loads(self.rfile.read(n)))
+                outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                 status, body = outer.script.pop(0)
                 self.send_response(status)
                 self.send_header("Content-Type", "text/event-stream" if status == 200 else "text/plain")
@@ -68,12 +70,12 @@ class FakeToolbox:
 
 
 class AgentTests(unittest.TestCase):
-    def make(self, script, **cfg_kwargs):
+    def make(self, script, key="nvapi-test", **cfg_kwargs):
         provider = FakeProvider(script)
         self.addCleanup(provider.close)
         cfg = Config(base_url=provider.url, model="main", **cfg_kwargs)
         toolbox = FakeToolbox()
-        return provider, toolbox, Agent(cfg, "nvapi-test", toolbox)
+        return provider, toolbox, Agent(cfg, key, toolbox)
 
     def run_turn(self, agent, history):
         out, status = [], []
@@ -144,6 +146,55 @@ class AgentTests(unittest.TestCase):
         _, _, agent = self.make([], extra_system_prompt="Call me qmil.")
         self.assertIn("echo", agent.system)
         self.assertIn("Call me qmil.", agent.system)
+
+    # -- base url / key / system prompt wiring
+
+    def test_authorization_header_sent_with_key(self):
+        provider, _, agent = self.make([text("ok")])
+        self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertEqual(provider.headers[0]["authorization"], "Bearer nvapi-test")
+
+    def test_no_authorization_header_without_key(self):
+        provider, _, agent = self.make([text("ok")], key=None)
+        self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertNotIn("authorization", provider.headers[0])
+
+    def test_system_prompt_comes_from_file_and_is_reread_each_turn(self):
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = pathlib.Path(d) / "sys.md"
+            f.write_text("You are version one. Tools: {tools}.")
+            provider, _, agent = self.make([text("a"), text("b")], system_prompt_file=str(f))
+            self.run_turn(agent, [{"role": "user", "content": "hi"}])
+            f.write_text("You are version two.")
+            self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        first, second = (r["messages"][0] for r in provider.requests)
+        self.assertEqual(first["role"], "system")
+        self.assertEqual(first["content"], "You are version one. Tools: echo.")
+        self.assertEqual(second["content"], "You are version two.")
+
+    def test_bad_prompt_file_warns_once_and_falls_back(self):
+        provider, _, agent = self.make([text("a"), text("b")],
+                                       system_prompt_file="/nonexistent/prompt.md")
+        _, status1 = self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        _, status2 = self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertIn("system_prompt_file", status1)
+        self.assertNotIn("system_prompt_file", status2)
+        self.assertIn("desktop assistant", provider.requests[0]["messages"][0]["content"])
+
+    def test_404_hint_mentions_base_url(self):
+        provider, _, agent = self.make([(404, "nope")])
+        with self.assertRaises(ProviderError) as cm:
+            self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertIn("base_url", str(cm.exception))
+        self.assertIn(provider.url, str(cm.exception))
+
+    def test_unreachable_server_error_names_the_base_url(self):
+        agent = Agent(Config(base_url="http://127.0.0.1:1/v1", max_attempts=1), "k", FakeToolbox())
+        with self.assertRaises(ProviderError) as cm:
+            self.run_turn(agent, [{"role": "user", "content": "hi"}])
+        self.assertIn("could not reach http://127.0.0.1:1/v1", str(cm.exception))
 
 
 if __name__ == "__main__":
