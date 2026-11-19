@@ -1,5 +1,6 @@
 """Application entry point."""
 import os
+import subprocess
 import sys
 
 import gi
@@ -9,6 +10,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
 from . import config  # noqa: E402
+from .daemon import SOCK_PATH  # noqa: E402
 from .ui import CSS, Panel  # noqa: E402
 
 
@@ -16,8 +18,10 @@ class App(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="dev.local.DeskAI")
         self.panel = None
+        self._daemon_proc = None
 
     def do_activate(self):
+        self._ensure_daemon()
         if self.panel is None:
             provider = Gtk.CssProvider()
             provider.load_from_data(CSS)
@@ -28,7 +32,22 @@ class App(Gtk.Application):
         self.panel.present()
         self.panel.entry.grab_focus()
 
-        # Reload settings without restarting: <Ctrl>R or /reload in the entry.
+    def _ensure_daemon(self):
+        """Start the core daemon as a separate process if it isn't already running."""
+        if self._daemon_proc is not None and self._daemon_proc.poll() is None:
+            return  # already running
+        entry_point = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "daemon.py")
+        )
+        self._daemon_proc = subprocess.Popen(
+            [sys.executable, entry_point],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    # Reload settings without restarting: <Ctrl>R or /reload in the entry.
         action = Gio.SimpleAction.new("reload", None)
         action.connect("activate", lambda _a, _p: self.panel.reload_settings())
         self.add_action(action)

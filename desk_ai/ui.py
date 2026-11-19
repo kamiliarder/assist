@@ -1,4 +1,8 @@
-"""The chat window."""
+"""The chat window: a GTK client that talks to the desk-ai daemon over a Unix socket."""
+from __future__ import annotations
+
+import json
+import socket
 import threading
 
 import gi
@@ -7,10 +11,9 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
 from . import config  # noqa: E402
+from .daemon import SOCK_PATH  # noqa: E402
 from .history import HistoryStore  # noqa: E402
-from .llm import Agent, CancelledError  # noqa: E402
 from .mdview import MarkdownWriter  # noqa: E402
-from .tools import Toolbox  # noqa: E402
 
 CSS = b"""
 textview, textview text { font-size: 14px; }
@@ -28,8 +31,6 @@ class Panel(Gtk.ApplicationWindow):
         self._cancel = threading.Event()
         self.store = HistoryStore(cfg.history_enabled, cfg.history_dir)
         self.store.new_session()
-        self.toolbox = Toolbox(self.confirm, cfg.command_timeout)
-        self.agent = Agent(cfg, key, self.toolbox)
 
         self.set_default_size(cfg.window_width, cfg.window_height)
         self.connect("close-request", self.on_close)
@@ -105,6 +106,11 @@ class Panel(Gtk.ApplicationWindow):
         if not key and config.requires_api_key(cfg):
             self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
 
+        # Socket connection to the daemon (started in a background thread)
+        self._sock = None
+        self._sock_lock = threading.Lock()
+        threading.Thread(target=self._connect_socket, daemon=True).start()
+
         # Model list is not loaded at startup; click ⮌ to refresh manually.
         # The configured model (cfg.model) is used by the agent immediately.
 
@@ -135,9 +141,80 @@ class Panel(Gtk.ApplicationWindow):
         if model == self.cfg.model:
             return
         self.cfg.model = model
-        self.agent = Agent(self.cfg, self.key, self.toolbox)
         self.append(f"\n[model switched to: {model}]\n", "tool")
         self.entry.grab_focus()
+
+    # -- socket
+
+    def _connect_socket(self):
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(SOCK_PATH))
+            with self._sock_lock:
+                self._sock = sock
+            GLib.idle_add(self._announce_ready)
+            self._read_loop(sock)
+        except (FileNotFoundError, ConnectionRefusedError, OSError):
+            GLib.idle_add(lambda: self.append(
+                "\n[daemon not reachable at "
+                f"{SOCK_PATH}. Start it with: python -m desk_ai.daemon]\n", "err"))
+        finally:
+            with self._sock_lock:
+                self._sock = None
+
+    def _announce_ready(self):
+        self.append(f"\n[connected to daemon at {SOCK_PATH}]\n", "tool")
+        self.entry.grab_focus()
+        return False
+
+    def _read_loop(self, sock):
+        buf = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        msg = json.loads(line.decode("utf-8"))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    GLib.idle_add(self._on_daemon_msg, msg)
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
+        finally:
+            GLib.idle_add(lambda: self.append("\n[daemon disconnected]\n", "err"))
+            with self._sock_lock:
+                self._sock = None
+
+    def _send(self, msg: dict):
+        with self._sock_lock:
+            sock = self._sock
+        if sock is None:
+            return
+        try:
+            sock.sendall((json.dumps(msg) + "\n").encode("utf-8"))
+        except (BrokenPipeError, OSError):
+            with self._sock_lock:
+                self._sock = None
+
+    def _on_daemon_msg(self, msg: dict):
+        mtype = msg.get("type")
+        if mtype == "output":
+            tag = msg.get("tag")
+            self.append(msg.get("text", ""), tag)
+        elif mtype == "done":
+            self.finish()
+        elif mtype == "confirm_request":
+            self.show_confirm(msg.get("id"), msg.get("text", ""))
+        elif mtype == "toggle":
+            self.request_toggle()
+        elif mtype == "status":
+            self.busy = msg.get("busy", False)
+            self.cancel_btn.set_visible(self.busy)
+        return False
 
     # -- UI helpers (main thread only)
 
@@ -227,7 +304,7 @@ class Panel(Gtk.ApplicationWindow):
         self.append("\n")
         self.append("\nai\n", "ai")
         self.store.append({"role": "user", "content": text})
-        threading.Thread(target=self.worker, args=(text, self._cancel), daemon=True).start()
+        self._send({"type": "message", "text": text})
 
     def reload_settings(self):
         """Re-read config.toml and the API key, rebuild the agent, and refresh the UI."""
@@ -235,8 +312,6 @@ class Panel(Gtk.ApplicationWindow):
         new_key = config.load_api_key(new_cfg)
         self.cfg = new_cfg
         self.key = new_key
-        self.toolbox = Toolbox(self.confirm, new_cfg.command_timeout)
-        self.agent = Agent(new_cfg, new_key, self.toolbox)
         self.append(f"\n[config reloaded] model: {new_cfg.model} @ {new_cfg.base_url}\n", "tool")
         for w in new_cfg.warnings:
             self.append(f"config: {w}\n", "err")
@@ -248,91 +323,41 @@ class Panel(Gtk.ApplicationWindow):
         """Re-exec the process so every Python module is reloaded from disk.
 
         Unlike reload_settings(), this picks up code changes in llm.py, tools/,
-        prompt.py, etc. Chat history is preserved on disk and restored on the
-        next launch.
+        prompt.py, etc. Chat history is flushed to disk before the process is
+        replaced, so the current session persists across the restart.
         """
         self.append("\n[restarting desk-ai...]\n", "tool")
+        self.store.save()
         from .app import restart
         restart()
-
-    def worker(self, text, cancel):
-        def ui(fn, *a):
-            GLib.idle_add(lambda: fn(*a) or False)
-
-        msgs = self.store.messages()
-        mark = len(msgs) - 1  # index of this turn's user message
-        try:
-            self.agent.run_turn(msgs, cancel,
-                                on_text=lambda t: ui(self.append_md, t),
-                                on_status=lambda s: ui(self.append, s, "tool"),
-                                on_pause=lambda r: self.confirm_pause(r))
-        except CancelledError:
-            ui(self.append, "\n[cancelled]\n", "tool")
-        except Exception as e:  # noqa: BLE001
-            ui(self.append, f"\n[error] {e}\n", "err")
-            if len(msgs) == mark + 1:
-                # Failed before anything happened: drop the dangling message and
-                # put the text back so you can just press Enter again.
-                self.store.truncate_after(mark)
-                ui(self.entry.set_text, text)
-            else:
-                ui(self.append, "(a tool already ran this turn, so your message was kept)\n", "tool")
-        finally:
-            ui(self.append, "\n")
-            self.store.save()
-            ui(self.finish)
 
     def finish(self):
         self.busy = False
         self.cancel_btn.set_visible(False)
         self.entry.grab_focus()
 
-    # -- approval flow (called from the worker thread)
+    def on_cancel(self, _btn):
+        self._cancel.set()
+        self._send({"type": "cancel"})
 
-    def confirm(self, text):
-        ev, box = threading.Event(), {"ok": False}
+    # -- approval flow (called from the main thread via GLib.idle_add)
 
-        def show():
-            self.allow_btn.set_label("Allow")
-            self.deny_btn.set_label("Deny")
-            self.confirm_label.set_text(f"Run this command?\n\n{text}")
-            self.confirm_box.set_visible(True)
-            self._pending = (ev, box)
-            self.present()  # bring the window forward so the prompt is seen
-            return False
-
-        GLib.idle_add(show)
-        if not ev.wait(self.cfg.approval_timeout):
-            GLib.idle_add(lambda: self._answer(False) or False)
-            ev.wait(5)
-        return box["ok"]
+    def show_confirm(self, cid, text):
+        self.allow_btn.set_label("Allow")
+        self.deny_btn.set_label("Deny")
+        self.confirm_label.set_text(text)
+        self._pending = (cid,)
+        self.confirm_box.set_visible(True)
+        self.present()  # bring the window forward so the prompt is seen
 
     def _answer(self, ok):
         if self._pending is None:
             return
-        ev, box = self._pending
+        cid = self._pending[0]
         self._pending = None
-        box["ok"] = ok
+        self._send({"type": "confirm_response", "id": cid, "ok": ok})
         self.confirm_box.set_visible(False)
-        ev.set()
 
-    def confirm_pause(self, rounds):
-        ev, box = threading.Event(), {"ok": False}
-
-        def show():
-            self.allow_btn.set_label("Resume")
-            self.deny_btn.set_label("Stop")
-            self.confirm_label.set_text(
-                f"{rounds} tools have run this turn. Resume or stop?")
-            self.confirm_box.set_visible(True)
-            self._pending = (ev, box)
-            self.present()
-            return False
-
-        GLib.idle_add(show)
-        if not ev.wait(self.cfg.approval_timeout):
-            GLib.idle_add(lambda: self._answer(False) or False)
-            ev.wait(5)
-        GLib.idle_add(lambda: (self.allow_btn.set_label("Allow"),
-                               self.deny_btn.set_label("Deny")) or False)
-        return box["ok"]
+    def request_toggle(self):
+        """The daemon asked us to toggle visibility (hide the window)."""
+        self.set_visible(False)
