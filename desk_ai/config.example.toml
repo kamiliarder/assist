@@ -32,3 +32,4 @@
 # --- window ---
 # window_width = 460
 # window_height = 600
+# render_markdown = true        # false = show the raw text, markers and all

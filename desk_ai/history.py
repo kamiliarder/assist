@@ -20,6 +20,26 @@ class HistoryStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.sessions: list[Session] = []
         self.current: Session | None = None
+        self.load_sessions()
+
+    # -- session discovery
+
+    def load_sessions(self) -> None:
+        """Load all existing session files from the history directory into memory."""
+        if not self.dir.exists():
+            return
+        for path in sorted(self.dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            name = data.get("name") or path.stem
+            messages = data.get("messages", [])
+            if not isinstance(messages, list):
+                messages = []
+            self.sessions.append(Session(name=name, messages=messages))
+        if self.sessions and self.current is None:
+            self.current = self.sessions[-1]
 
     # -- session lifecycle
 

@@ -1,4 +1,5 @@
 """Application entry point."""
+import os
 import sys
 
 import gi
@@ -33,6 +34,12 @@ class App(Gtk.Application):
         self.add_action(action)
         self.set_accels_for_action("app.reload", ["<Ctrl>R"])
 
+        # Full process restart: reloads every Python module from disk.
+        restart_action = Gio.SimpleAction.new("restart", None)
+        restart_action.connect("activate", lambda _a, _p: restart())
+        self.add_action(restart_action)
+        self.set_accels_for_action("app.restart", ["<Ctrl><Shift>R"])
+
 
 def print_config():
     """`python assistant.py --print-config`: show effective settings and the exact system prompt."""
@@ -46,6 +53,11 @@ def print_config():
         print(f"warning: {warning}")
     print("\n--- system prompt (as sent to the model) ---")
     print(text)
+
+
+def restart():
+    """Re-exec the current process so all Python modules are reloaded from disk."""
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
 
 
 def main():

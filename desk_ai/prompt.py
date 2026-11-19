@@ -24,6 +24,7 @@ never claim success you didn't see.
 - Installing packages for python is through the flake.nix file at py =
 
 Your own source code is in {app_dir}. Your config file is {config_file}.
+Respond in a markdown format.
 """
 
 PLACEHOLDERS = ("tools", "date", "home", "app_dir", "config_file", "model")

@@ -54,6 +54,21 @@ cleaned up (with a note); an unusable value falls back to the NVIDIA default wit
 prompt is safe. The file is re-read every turn, so you can tune the prompt without restarting; an
 unreadable or empty file warns once in the window and falls back.
 
+## Markdown
+
+Your messages and the model's replies are rendered as markdown: headings, **bold**, *italic*,
+~~strike~~, `inline code`, fenced code blocks, bullet/numbered lists (nested by 2-space indent),
+> quotes, `---` rules and [links](https://example.com) (shown as `text (url)`, not clickable).
+Tables are shown as monospace text. Single newlines stay line breaks. Replies are re-rendered as
+they stream in, so half-finished markup (`**bo`, an unclosed ```` ``` ````) shows literally for a
+moment, then snaps into place. Set `render_markdown = false` in `config.toml` to see raw text.
+The parser is `markdown.py`, the streaming logic `mdview.py`; the styles live in `ui.py`
+(`_create_markdown_tags`).
+
+Not supported: HTML, images, nested block quotes, bare-URL detection. Globs like `src/*/x_*.py`
+outside backticks can be mistaken for emphasis. Typing multi-line input (so you can write a fenced
+block yourself) needs a multi-line input box; the current one-line entry can't hold newlines.
+
 ## niri keybind and window rule (Mod+A is free in your config)
 
 ```kdl

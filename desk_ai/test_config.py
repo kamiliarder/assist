@@ -122,6 +122,13 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("api key: set", out)
         self.assertIn("api key: MISSING", config.describe(cfg, None))
 
+    def test_render_markdown_defaults_on_and_must_be_a_bool(self):
+        self.assertTrue(self.load_with().render_markdown)
+        self.assertFalse(self.load_with("render_markdown = false\n").render_markdown)
+        cfg = self.load_with('render_markdown = "no"\n')
+        self.assertTrue(cfg.render_markdown)
+        self.assertEqual(len(cfg.warnings), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

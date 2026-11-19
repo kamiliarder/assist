@@ -2,6 +2,7 @@
 import os
 import pathlib
 import tomllib
+import httpx
 from dataclasses import dataclass, field, fields
 from urllib.parse import urlsplit
 
@@ -41,6 +42,7 @@ class Config:
     # window
     window_width: int = 460
     window_height: int = 600
+    render_markdown: bool = True  # **bold**, lists, `code`, code blocks... in the chat window
 
     # history / sessions
     history_enabled: bool = True
@@ -139,6 +141,28 @@ def load_api_key(cfg: Config):
         return path.read_text().strip() or None
     except OSError:
         return None
+
+
+def fetch_models(base_url: str, key=None, timeout: float = 10.0):
+    """Query {base_url}/models and return a list of model ids. Empty list on any failure."""
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            r = client.get(url, headers=headers)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        models = []
+        for item in data.get("data", []) or []:
+            mid = item.get("id") if isinstance(item, dict) else None
+            if mid:
+                models.append(mid)
+        return models
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def describe(cfg: Config, key) -> str:

@@ -9,6 +9,7 @@ from gi.repository import GLib, Gtk, Pango  # noqa: E402
 from . import config  # noqa: E402
 from .history import HistoryStore  # noqa: E402
 from .llm import Agent, CancelledError  # noqa: E402
+from .mdview import MarkdownWriter  # noqa: E402
 from .tools import Toolbox  # noqa: E402
 
 CSS = b"""
@@ -38,6 +39,24 @@ class Panel(Gtk.ApplicationWindow):
             getattr(box, f"set_margin_{side}")(12)
         self.set_child(box)
 
+        # Model selector row
+        self.model_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.model_label = Gtk.Label(label="Model:", xalign=0)
+        self.model_label.set_hexpand(False)
+        self.model_dropdown = Gtk.DropDown()
+        self.model_dropdown.set_hexpand(True)
+        self.model_refresh = Gtk.Button(label="↻")
+        self.model_refresh.set_tooltip_text("Refresh model list from the API")
+        self.model_refresh.connect("clicked", lambda _b: self._load_models())
+        self.model_row.append(self.model_label)
+        self.model_row.append(self.model_dropdown)
+        self.model_row.append(self.model_refresh)
+        box.append(self.model_row)
+
+        self._model_store = Gtk.StringList()
+        self.model_dropdown.set_model(self._model_store)
+        self._model_changed_handler = self.model_dropdown.connect("notify::selected", self._on_model_changed)
+
         self.view = Gtk.TextView(editable=False, cursor_visible=False,
                                  wrap_mode=Gtk.WrapMode.WORD_CHAR,
                                  left_margin=6, right_margin=6)
@@ -46,6 +65,8 @@ class Panel(Gtk.ApplicationWindow):
         self.buf.create_tag("ai", weight=700, foreground="#b794f6")
         self.buf.create_tag("tool", style=Pango.Style.ITALIC, foreground="#8a8799")
         self.buf.create_tag("err", foreground="#ff6b6b")
+        self._create_markdown_tags()
+        self.md = MarkdownWriter(self.buf, on_change=self._scroll_end)
         self.scroller = Gtk.ScrolledWindow(vexpand=True)
         self.scroller.set_child(self.view)
         box.append(self.scroller)
@@ -84,16 +105,83 @@ class Panel(Gtk.ApplicationWindow):
         if not key and config.requires_api_key(cfg):
             self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
 
+        # Model list is not loaded at startup; click ⮌ to refresh manually.
+        # The configured model (cfg.model) is used by the agent immediately.
+
+    def _load_models(self):
+        """Fetch available models from {base_url}/models and fill the dropdown."""
+        key = self.key if config.requires_api_key(self.cfg) else None
+        models = config.fetch_models(self.cfg.base_url, key=key)
+        self._model_store.splice(0, self._model_store.get_n_items(), models)
+        if models:
+            # Select the currently configured model if it's in the list.
+            # Do not auto-switch to index 0 just because the configured model
+            # isn't available — that changes the effective model without asking.
+            try:
+                idx = models.index(self.cfg.model)
+            except ValueError:
+                idx = -1
+            if idx >= 0:
+                self.model_dropdown.handler_block(self._model_changed_handler)
+                self.model_dropdown.set_selected(idx)
+                self.model_dropdown.handler_unblock(self._model_changed_handler)
+        self.append(f"\n[models] {len(models)} available from {self.cfg.base_url}\n", "tool")
+
+    def _on_model_changed(self, dropdown, _pspec):
+        idx = dropdown.get_selected()
+        if idx < 0:
+            return
+        model = self._model_store.get_string(idx)
+        if model == self.cfg.model:
+            return
+        self.cfg.model = model
+        self.agent = Agent(self.cfg, self.key, self.toolbox)
+        self.append(f"\n[model switched to: {model}]\n", "tool")
+        self.entry.grab_focus()
+
     # -- UI helpers (main thread only)
 
+    def _create_markdown_tags(self):
+        """Styles for desk_ai/markdown.py. Names must match; later tags win over earlier ones."""
+        styles = {
+            "dim": dict(foreground="#8a8799"),
+            "bold": dict(weight=700),
+            "italic": dict(style=Pango.Style.ITALIC),
+            "strike": dict(strikethrough=True),
+            "link": dict(foreground="#7aa2ff", underline=Pango.Underline.SINGLE),
+            "h1": dict(weight=700, scale=1.4, pixels_above_lines=6),
+            "h2": dict(weight=700, scale=1.25, pixels_above_lines=4),
+            "h3": dict(weight=700, scale=1.1, pixels_above_lines=2),
+            "code": dict(family="monospace", background="#3a3a42", foreground="#f0c987"),
+            "quote": dict(left_margin=16, foreground="#b4b1c4"),
+            "codeblock": dict(family="monospace", paragraph_background="#26262c",
+                              foreground="#d6d6e0", left_margin=10, right_margin=10),
+        }
+        for level in range(4):  # list items hang their bullet; continuation lines just indent
+            styles[f"li{level}"] = dict(left_margin=22 + 16 * level, indent=-16)
+            styles[f"lc{level}"] = dict(left_margin=22 + 16 * level)
+        for name, props in styles.items():
+            self.buf.create_tag(name, **props)
+
+    def _scroll_end(self):
+        adj = self.scroller.get_vadjustment()
+        GLib.idle_add(lambda: adj.set_value(adj.get_upper()) or False)
+
     def append(self, text, tag=None):
+        self.md.close()  # anything else written to the buffer ends the markdown segment
         end = self.buf.get_end_iter()
         if tag:
             self.buf.insert_with_tags_by_name(end, text, tag)
         else:
             self.buf.insert(end, text)
-        adj = self.scroller.get_vadjustment()
-        GLib.idle_add(lambda: adj.set_value(adj.get_upper()) or False)
+        self._scroll_end()
+
+    def append_md(self, text):
+        """Model/user text: rendered as markdown (re-rendered as chunks arrive) unless disabled."""
+        if self.cfg.render_markdown:
+            self.md.write(text)
+        else:
+            self.append(text)
 
     def on_close(self, _win):
         self.set_visible(False)  # keep the process (and chat history) alive
@@ -105,6 +193,10 @@ class Panel(Gtk.ApplicationWindow):
             entry.set_text("")
             self.reload_settings()
             return
+        if text == "/restart":
+            entry.set_text("")
+            self.restart()
+            return
         if text == "/prev-session":
             entry.set_text("")
             prev = self.store.switch_previous()
@@ -112,7 +204,17 @@ class Panel(Gtk.ApplicationWindow):
                 self.append("\n[no previous session]\n", "tool")
             else:
                 self.append(f"\n[switched to session: {prev['name']}]\n", "tool")
-                self.append(f"({len(prev.get('messages', []))} messages)\n", "tool")
+                self.append(f"({len(prev['messages'])} messages)\n", "tool")
+                for m in prev["messages"]:
+                    role = m.get("role", "?")
+                    content = m.get("content") or ""
+                    if role == "user":
+                        self.append(f"\nyou\n{content}\n", "you")
+                    elif role == "assistant":
+                        self.append(f"\nai\n{content}\n", "ai")
+                    elif role == "tool":
+                        self.append(f"\n[tool result] {content}\n", "tool")
+                self.store.save()
             return
         if not text or self.busy or (not self.key and config.requires_api_key(self.cfg)):
             return
@@ -121,7 +223,8 @@ class Panel(Gtk.ApplicationWindow):
         self._cancel.clear()
         self.cancel_btn.set_visible(True)
         self.append("\nyou\n", "you")
-        self.append(f"{text}\n")
+        self.append_md(text)
+        self.append("\n")
         self.append("\nai\n", "ai")
         self.store.append({"role": "user", "content": text})
         threading.Thread(target=self.worker, args=(text, self._cancel), daemon=True).start()
@@ -141,6 +244,17 @@ class Panel(Gtk.ApplicationWindow):
             self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
         self.entry.grab_focus()
 
+    def restart(self):
+        """Re-exec the process so every Python module is reloaded from disk.
+
+        Unlike reload_settings(), this picks up code changes in llm.py, tools/,
+        prompt.py, etc. Chat history is preserved on disk and restored on the
+        next launch.
+        """
+        self.append("\n[restarting desk-ai...]\n", "tool")
+        from .app import restart
+        restart()
+
     def worker(self, text, cancel):
         def ui(fn, *a):
             GLib.idle_add(lambda: fn(*a) or False)
@@ -149,7 +263,7 @@ class Panel(Gtk.ApplicationWindow):
         mark = len(msgs) - 1  # index of this turn's user message
         try:
             self.agent.run_turn(msgs, cancel,
-                                on_text=lambda t: ui(self.append, t),
+                                on_text=lambda t: ui(self.append_md, t),
                                 on_status=lambda s: ui(self.append, s, "tool"),
                                 on_pause=lambda r: self.confirm_pause(r))
         except CancelledError:
