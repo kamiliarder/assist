@@ -56,8 +56,15 @@ def print_config():
 
 
 def restart():
-    """Re-exec the current process so all Python modules are reloaded from disk."""
-    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
+    """Re-exec the entry point so all Python modules are reloaded from disk.
+
+    assistant.py is the real entry point; app.py has no __main__ guard, so
+    execing it directly would silently do nothing.
+    """
+    entry_point = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "assistant.py")
+    )
+    os.execv(sys.executable, [sys.executable, entry_point])
 
 
 def main():
