@@ -13,6 +13,14 @@ def clean_env():
     return {k: v for k, v in os.environ.items() if k not in LEAKY_ENV}
 
 
-def _run(cmd, timeout=5):
+def _run(cmd, timeout=15):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=clean_env())
     return (r.stdout + r.stderr).strip()
+
+
+def get_tavily_key():
+    """Read Tavily API key from secure config file."""
+    key_path = pathlib.Path(HOME) / ".config" / "desk-ai" / "tavily_key"
+    if key_path.exists():
+        return key_path.read_text().strip()
+    return None

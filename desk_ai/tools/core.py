@@ -51,6 +51,9 @@ class Toolbox:
             "web_open": self.web_open,
             "web_search": self.web_search,
             "web_read": self.web_read,
+            "web_tavily_search": self.web_tavily_search,
+            "web_tavily_extract": self.web_tavily_extract,
+            "web_tavily_search_and_extract": self.web_tavily_search_and_extract,
             "obsidian": self.obsidian,
         })
         self.schemas.extend([
@@ -100,6 +103,22 @@ class Toolbox:
                   {"query": {"type": "string"}}, ["query"]),
             _tool("web_read", "Fetch a URL and return its text content.",
                   {"url": {"type": "string"}}, ["url"]),
+            _tool("web_tavily_search", "Search the web using Tavily API and return structured results.",
+                  {"query": {"type": "string"},
+                   "max_results": {"type": "integer"},
+                   "search_depth": {"type": "string", "enum": ["basic", "advanced"]},
+                   "include_domains": {"type": "array", "items": {"type": "string"}},
+                   "exclude_domains": {"type": "array", "items": {"type": "string"}}},
+                  ["query"]),
+            _tool("web_tavily_extract", "Extract content from URLs using Tavily API.",
+                  {"urls": {"type": "array", "items": {"type": "string"}},
+                   "include_images": {"type": "boolean"}},
+                  ["urls"]),
+            _tool("web_tavily_search_and_extract", "Search and extract content in one call using Tavily API.",
+                  {"query": {"type": "string"},
+                   "max_results": {"type": "integer"},
+                   "search_depth": {"type": "string", "enum": ["basic", "advanced"]}},
+                  ["query"]),
             _tool("obsidian",
                   "Run an obsidian-cli command against a running Obsidian vault "
                   "(files, tags, tasks, append, move, outline, links, etc.). "
@@ -126,7 +145,7 @@ class Toolbox:
             fn = getattr(self.fileops, name, None)
             if fn is not None:
                 setattr(self, name, fn)
-        for name in ("open", "search", "read"):
+        for name in ("open", "search", "read", "tavily_search", "tavily_extract", "tavily_search_and_extract"):
             fn = getattr(web, name, None)
             if fn is not None:
                 setattr(self, "web_" + name, fn.__get__(self, Toolbox))
