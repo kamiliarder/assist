@@ -14,6 +14,8 @@ class Session:
 
 
 class HistoryStore:
+    MAX_SESSIONS = 5
+
     def __init__(self, enabled: bool, history_dir: str = ""):
         self.enabled = enabled
         self.dir = pathlib.Path(history_dir).expanduser() if history_dir else pathlib.Path.home() / ".config" / "desk-ai" / "history"
@@ -28,7 +30,13 @@ class HistoryStore:
         """Load all existing session files from the history directory into memory."""
         if not self.dir.exists():
             return
-        for path in sorted(self.dir.glob("*.json")):
+        paths = sorted(self.dir.glob("*.json"))
+        for path in paths[:-self.MAX_SESSIONS]:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for path in paths[-self.MAX_SESSIONS:]:
             try:
                 data = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError):
@@ -47,6 +55,13 @@ class HistoryStore:
         name = time.strftime("%Y-%m-%d_%H-%M-%S")
         self.current = Session(name=name)
         self.sessions.append(self.current)
+        if len(self.sessions) > self.MAX_SESSIONS:
+            old = self.sessions.pop(0)
+            old_path = self.dir / f"{old.name}.json"
+            try:
+                old_path.unlink()
+            except OSError:
+                pass
         if self.enabled:
             self.save()
 
