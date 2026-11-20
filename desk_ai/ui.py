@@ -1,4 +1,7 @@
 """The chat window."""
+import importlib
+import pathlib
+import sys
 import threading
 
 import gi
@@ -7,6 +10,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Pango  # noqa: E402
 
 from . import config  # noqa: E402
+from .config import config_dir  # noqa: E402
 from .history import HistoryStore  # noqa: E402
 from .llm import Agent, CancelledError  # noqa: E402
 from .mdview import MarkdownWriter  # noqa: E402
@@ -19,7 +23,7 @@ textview, textview text { font-size: 14px; }
 
 
 class Panel(Gtk.ApplicationWindow):
-    def __init__(self, app, cfg, key):
+    def __init__(self, app, cfg, key, resume_session=None):
         super().__init__(application=app, title="desk-ai")
         self.cfg = cfg
         self.key = key
@@ -27,7 +31,12 @@ class Panel(Gtk.ApplicationWindow):
         self._pending = None
         self._cancel = threading.Event()
         self.store = HistoryStore(cfg.history_enabled, cfg.history_dir)
-        self.store.new_session()
+        if resume_session is not None:
+            self.store.current = resume_session
+            if resume_session not in self.store.sessions:
+                self.store.sessions.append(resume_session)
+        else:
+            self.store.new_session()
         self.toolbox = Toolbox(self.confirm, cfg.command_timeout)
         self.agent = Agent(cfg, key, self.toolbox)
 
@@ -230,13 +239,28 @@ class Panel(Gtk.ApplicationWindow):
         threading.Thread(target=self.worker, args=(text, self._cancel), daemon=True).start()
 
     def reload_settings(self):
-        """Re-read config.toml and the API key, rebuild the agent, and refresh the UI."""
+        """Re-read config.toml, hot-reload Python modules from disk, rebuild the agent, and refresh the UI.
+
+        The chat session stays alive; history is preserved in memory.
+        """
         new_cfg = config.load()
         new_key = config.load_api_key(new_cfg)
         self.cfg = new_cfg
         self.key = new_key
-        self.toolbox = Toolbox(self.confirm, new_cfg.command_timeout)
-        self.agent = Agent(new_cfg, new_key, self.toolbox)
+
+        # Best-effort hot-reload of every desk_ai module so code changes take effect
+        # without killing the session. Modules are reloaded in dependency order where
+        # possible; anything that fails is reported but doesn't abort the reload.
+        reloaded, failed = self._hot_reload_modules()
+        self.append(f"\n[modules reloaded: {', '.join(reloaded) or 'none'}]\n", "tool")
+        for mod, err in failed:
+            self.append(f"[reload failed: {mod} — {err}]\n", "err")
+
+        # Re-import classes from reloaded modules so new code is actually used
+        from .llm import Agent as NewAgent
+        from .tools import Toolbox as NewToolbox
+        self.toolbox = NewToolbox(self.confirm, new_cfg.command_timeout)
+        self.agent = NewAgent(new_cfg, new_key, self.toolbox)
         self.append(f"\n[config reloaded] model: {new_cfg.model} @ {new_cfg.base_url}\n", "tool")
         for w in new_cfg.warnings:
             self.append(f"config: {w}\n", "err")
@@ -244,14 +268,39 @@ class Panel(Gtk.ApplicationWindow):
             self.append("No API key. Set NVIDIA_API_KEY or put it in ~/.config/desk-ai/api_key\n", "err")
         self.entry.grab_focus()
 
+    def _hot_reload_modules(self):
+        """Reload all loaded desk_ai modules. Returns (reloaded_names, failed_list)."""
+        import desk_ai
+        package_dir = pathlib.Path(desk_ai.__file__).parent
+        targets = sorted(
+            m for m in sys.modules
+            if m.startswith("desk_ai") and sys.modules[m] is not None
+            and getattr(sys.modules[m], "__file__", None)
+            and pathlib.Path(sys.modules[m].__file__).parent == package_dir
+        )
+        # Reverse dependency order: submodules first, then the package itself.
+        targets = sorted(targets, key=lambda m: m.count("."), reverse=True)
+        reloaded, failed = [], []
+        for name in targets:
+            mod = sys.modules[name]
+            try:
+                importlib.reload(mod)
+                reloaded.append(name)
+            except Exception as e:  # noqa: BLE001
+                failed.append((name, str(e) or type(e).__name__))
+        return reloaded, failed
+
     def restart(self):
         """Re-exec the process so every Python module is reloaded from disk.
 
         Unlike reload_settings(), this picks up code changes in llm.py, tools/,
-        prompt.py, etc. Chat history is preserved on disk and restored on the
-        next launch.
+        prompt.py, etc. The current session is saved to a marker file and
+        restored on the next launch so the chat persists.
         """
         self.append("\n[restarting desk-ai...]\n", "tool")
+        if self.store.current is not None:
+            marker = config_dir() / ".resume_session"
+            marker.write_text(self.store.current.name)
         from .app import restart
         restart()
 
@@ -266,6 +315,7 @@ class Panel(Gtk.ApplicationWindow):
                                 on_text=lambda t: ui(self.append_md, t),
                                 on_status=lambda s: ui(self.append, s, "tool"),
                                 on_pause=lambda r: self.confirm_pause(r))
+            self.store.save()
         except CancelledError:
             ui(self.append, "\n[cancelled]\n", "tool")
         except Exception as e:  # noqa: BLE001

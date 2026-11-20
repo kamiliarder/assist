@@ -54,7 +54,11 @@ class HistoryStore:
         if not self.current or len(self.sessions) < 2:
             return None
         idx = self.sessions.index(self.current)
+        if idx == 0:
+            return None
         prev = self.sessions[idx - 1]
+        self.sessions.pop(idx)
+        self.sessions.append(prev)
         self.current = prev
         return {"name": prev.name, "messages": list(prev.messages)}
 
@@ -68,7 +72,8 @@ class HistoryStore:
             self.save()
 
     def messages(self) -> list:
-        return list(self.current.messages) if self.current else []
+        """Return the actual message list (not a copy) so callers can mutate it."""
+        return self.current.messages if self.current else []
 
     def truncate_after(self, mark: int) -> None:
         if self.current is None:
