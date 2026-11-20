@@ -9,6 +9,8 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, Gtk  # noqa: E402
 
 from . import config  # noqa: E402
+from .config import config_dir  # noqa: E402
+from .history import HistoryStore  # noqa: E402
 from .ui import CSS, Panel  # noqa: E402
 
 
@@ -24,7 +26,22 @@ class App(Gtk.Application):
             Gtk.StyleContext.add_provider_for_display(
                 Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             cfg = config.load()
-            self.panel = Panel(self, cfg, config.load_api_key(cfg))
+            resume_session = None
+            marker = config_dir() / ".resume_session"
+            if marker.exists():
+                try:
+                    name = marker.read_text().strip()
+                    marker.unlink()
+                except OSError:
+                    name = None
+                if name:
+                    store = HistoryStore(cfg.history_enabled, cfg.history_dir)
+                    for s in store.sessions:
+                        if s.name == name:
+                            resume_session = s
+                            break
+            self.panel = Panel(self, cfg, config.load_api_key(cfg),
+                               resume_session=resume_session)
         self.panel.present()
         self.panel.entry.grab_focus()
 

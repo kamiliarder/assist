@@ -1,7 +1,7 @@
 """Shared helpers and the Toolbox core (registration + dispatch)."""
 import pathlib
 
-from . import apps, command, fileops, media, web, windows
+from . import apps, command, fileops, media, obsidian, web, windows
 from .env import _run
 
 from .env import LEAKY_ENV  # noqa: F401  (re-exported for backwards compatibility)
@@ -51,6 +51,7 @@ class Toolbox:
             "web_open": self.web_open,
             "web_search": self.web_search,
             "web_read": self.web_read,
+            "obsidian": self.obsidian,
         })
         self.schemas.extend([
             _tool("list_windows", "List open windows (id, title, app_id)."),
@@ -99,14 +100,25 @@ class Toolbox:
                   {"query": {"type": "string"}}, ["query"]),
             _tool("web_read", "Fetch a URL and return its text content.",
                   {"url": {"type": "string"}}, ["url"]),
+            _tool("obsidian",
+                  "Run an obsidian-cli command against a running Obsidian vault "
+                  "(files, tags, tasks, append, move, outline, links, etc.). "
+                  "State-changing commands require user approval. "
+                  "Common aliases: 'file' -> 'name'/'path', 'folder' -> 'path'.",
+                  {"command": {"type": "string"},
+                   "args": {"type": "object",
+                            "description": "Optional key=value options for the command, e.g. {'folder': 'General', 'name': 'Note.md', 'content': '...'}"},
+                   "vault": {"type": "string",
+                             "description": "Optional vault name to target"}},
+                  ["command"]),
         ])
 
     def _bind_methods(self):
-        for mod in (windows, apps, media, command):
+        for mod in (windows, apps, media, command, obsidian):
             for name in ("list_windows", "focus_window", "open_app", "media", "run_command",
                          "focus_workspace_down", "focus_workspace_up", "focus_workspace",
                          "focus_workspace_previous", "center_window", "fullscreen_window",
-                         "switch_preset_window_width"):
+                         "switch_preset_window_width", "obsidian"):
                 fn = getattr(mod, name, None)
                 if fn is not None:
                     setattr(self, name, fn.__get__(self, Toolbox))
