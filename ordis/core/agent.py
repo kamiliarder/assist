@@ -125,7 +125,7 @@ class Agent:
                         c["function"]["name"] += fn["name"]
                     if fn.get("arguments"):
                         c["function"]["arguments"] += fn["arguments"]
-        if os.environ.get("DESK_AI_DEBUG"):
+        if os.environ.get("ORDIS_DEBUG"):
             print(f"[ordis] model={model} finish={finish} content_chars={len(content)} "
                   f"tool_calls={len(calls)} reasoning={saw_reasoning} done={saw_done}",
                   file=sys.stderr)
