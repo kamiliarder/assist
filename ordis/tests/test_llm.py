@@ -318,7 +318,7 @@ class AgentTests(unittest.TestCase):
         import os
         _, _, agent = self.make([raw(reasoning("t"), content("hi"), finish("stop"))])
         err = io.StringIO()
-        with mock.patch.dict(os.environ, {"DESK_AI_DEBUG": "1"}), contextlib.redirect_stderr(err):
+        with mock.patch.dict(os.environ, {"ORDIS_DEBUG": "1"}), contextlib.redirect_stderr(err):
             self.run_turn(agent, [{"role": "user", "content": "x"}])
         self.assertIn("finish=stop", err.getvalue())
         self.assertIn("reasoning=True", err.getvalue())
