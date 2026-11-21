@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Headless ordis core daemon. Runs as a background service.
+
+Exposes a Unix socket API at ~/.config/ordis/control.sock (or configured
+socket_path) for UI clients to connect to.
+"""
+import os
+import pathlib
+import sys
+
+# Allow reading the API key from a file (e.g. mounted by sops-nix or agenix).
+key_file = os.environ.get("ORDIS_API_KEY_FILE") or os.environ.get("NVIDIA_API_KEY_FILE")
+if key_file:
+    try:
+        os.environ["ORDIS_API_KEY"] = pathlib.Path(key_file).read_text().strip()
+    except OSError:
+        pass
+
+from ordis.core import Core
+from ordis.core.config import config_dir, load
+from ordis.core.types import CoreCallbacks
+
+
+class NoopCallbacks(CoreCallbacks):
+    """Headless core has no UI; callbacks are no-ops."""
+
+    def on_text(self, text: str) -> None:
+        pass
+
+    def on_status(self, status: str) -> None:
+        pass
+
+    def on_pause(self, rounds: int) -> bool:
+        return True
+
+    def confirm(self, text: str) -> bool:
+        # No UI to ask; deny by default for safety
+        return False
+
+    def on_finish(self) -> None:
+        pass
+
+
+def main():
+    cfg = load()
+    socket_path = cfg.socket_path or str(config_dir() / "control.sock")
+
+    core = Core(callbacks=NoopCallbacks())
+
+    print(f"ordis core running on {socket_path}", file=sys.stderr)
+
+    # Keep the process alive
+    import signal
+    import time
+
+    stop = False
+
+    def handle_signal(signum, frame):
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    while not stop:
+        time.sleep(1)
+
+    core.shutdown()
+
+
+if __name__ == "__main__":
+    main()

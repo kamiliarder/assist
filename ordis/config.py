@@ -128,6 +128,9 @@ def load() -> Config:
     css_file = os.environ.get("ORDIS_CSS_FILE")
     if css_file is not None:
         cfg.css_file = css_file
+    socket_path = os.environ.get("ORDIS_SOCKET_FILE")
+    if socket_path is not None:
+        cfg.socket_path = socket_path
 
     url, notes = check_base_url(cfg.base_url)
     if url is None:

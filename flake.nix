@@ -9,19 +9,33 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
 
-      py = pkgs.python3.withPackages (ps: [
+      pyCore = pkgs.python3.withPackages (ps: [
+        ps.httpx # streaming HTTP to the API
+      ]);
+
+      pyGui = pkgs.python3.withPackages (ps: [
         ps.pygobject3 # GTK4 and layer-shell bindings
         ps.httpx # streaming HTTP to the API
       ]);
     in
     {
-      packages.${system}.ordis = pkgs.writeShellApplication rec {
-        name = "ordis";
-        runtimeInputs = [ py pkgs.gtk4 pkgs.gtk4-layer-shell pkgs.glib pkgs.playerctl ];
-        text = ''
-          export GTK4_LAYER_SHELL_LIB=${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so
-          exec ${py}/bin/python /home/qmil/Projects/assist/assistant.py "$@"
-        '';
+      packages.${system} = {
+        ordis-core = pkgs.writeShellApplication rec {
+          name = "ordis-core";
+          runtimeInputs = [ pyCore ];
+          text = ''
+            exec ${pyCore}/bin/python /home/qmil/Projects/assist/ordis-core "$@"
+          '';
+        };
+
+        ordis = pkgs.writeShellApplication rec {
+          name = "ordis";
+          runtimeInputs = [ pyGui pkgs.gtk4 pkgs.gtk4-layer-shell pkgs.glib pkgs.playerctl ];
+          text = ''
+            export GTK4_LAYER_SHELL_LIB=${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so
+            exec ${pyGui}/bin/python /home/qmil/Projects/assist/assistant.py "$@"
+          '';
+        };
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -29,11 +43,11 @@
         nativeBuildInputs = [ pkgs.gobject-introspection ];
 
         buildInputs = [
-          py
-          py.pkgs.python-lsp-server
-          py.pkgs.python-lsp-ruff  # Fast linting and formatting
-          py.pkgs.pylsp-mypy       # Type checking
-          py.pkgs.pylsp-rope       # Refactoring support
+          pyGui
+          pyGui.pkgs.python-lsp-server
+          pyGui.pkgs.python-lsp-ruff  # Fast linting and formatting
+          pyGui.pkgs.pylsp-mypy       # Type checking
+          pyGui.pkgs.pylsp-rope       # Refactoring support
           pkgs.gtk4
           pkgs.gtk4-layer-shell
           pkgs.glib
