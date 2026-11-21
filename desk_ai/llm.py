@@ -1,5 +1,7 @@
 """LLM client (OpenAI-compatible, streaming) and the tool-calling agent loop. No GTK in here."""
+import base64
 import json
+import mimetypes
 import os
 import random
 import sys
@@ -35,9 +37,34 @@ class Agent:
         """Built fresh each time, so edits to system_prompt_file apply on the next request."""
         return prompt.build(self.cfg, self.toolbox.names())[0]
 
+    @staticmethod
+    def _image_data_url(path: str) -> str:
+        """Read a local image file and return a base64 data URL."""
+        mime, _ = mimetypes.guess_type(path)
+        if mime is None or not mime.startswith("image/"):
+            mime = "application/octet-stream"
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+
     # -- one streamed request
 
-    def _stream_once(self, model, messages, on_text, state, cancel=None):
+    def _stream_once(self, model, messages, on_text, state, cancel=None, images=None):
+        # Build the last user message as multimodal content if images are attached.
+        # OpenAI-style: content is a list of {type: text} / {type: image_url} parts.
+        if images:
+            new_messages = list(messages)
+            last = new_messages[-1]
+            if last.get("role") == "user":
+                parts = [{"type": "text", "text": last.get("content", "")}]
+                for path in images:
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": self._image_data_url(path)},
+                    })
+                new_messages[-1] = {"role": "user", "content": parts}
+            messages = new_messages
+
         payload = {
             "model": model,
             "messages": [{"role": "system", "content": self.system}] + messages,
@@ -130,7 +157,7 @@ class Agent:
 
     # -- retry / fallback
 
-    def _chat(self, messages, on_text, on_status, cancel=None):
+    def _chat(self, messages, on_text, on_status, cancel=None, images=None):
         """Retries transient errors with backoff, then falls back to other models.
 
         Only retries if no output has been shown yet, so a retry never duplicates text.
@@ -141,7 +168,7 @@ class Agent:
             for attempt in range(1, self.cfg.max_attempts + 1):
                 state = {"started": False}
                 try:
-                    return self._stream_once(model, messages, on_text, state, cancel)
+                    return self._stream_once(model, messages, on_text, state, cancel, images=images)
                 except (ProviderError, httpx.TransportError) as e:
                     retryable = e.retryable if isinstance(e, ProviderError) else True
                     if state["started"] or not retryable:
@@ -163,11 +190,12 @@ class Agent:
 
     # -- agent loop
 
-    def run_turn(self, history, cancel=None, on_text=None, on_status=None, on_pause=None):
+    def run_turn(self, history, cancel=None, on_text=None, on_status=None, on_pause=None, images=None):
         """model -> tools -> model, without a hard limit.
 
         `on_pause(rounds)` is called every `cfg.tool_round_warn_every` tool
         runs; return False (or raise) to stop the turn, True to resume.
+        `images` is a list of local file paths attached to this turn's user message.
         """
         warning = prompt.build(self.cfg, self.toolbox.names())[1]
         if warning != self._prompt_warning:  # report a bad system_prompt_file once, not every turn
@@ -179,7 +207,8 @@ class Agent:
             if self.cfg.max_tool_rounds and rounds >= self.cfg.max_tool_rounds:
                 on_text(f"\n(stopped after {rounds} tool rounds)\n")
                 return
-            msg = self._chat(history, on_text, on_status, cancel)
+            msg = self._chat(history, on_text, on_status, cancel, images=images)
+            images = None  # only attach images to the first request of the turn
             history.append(msg)
             if not msg.get("tool_calls"):
                 return

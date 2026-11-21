@@ -7,7 +7,7 @@ import threading
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk, Pango  # noqa: E402
+from gi.repository import GLib, Gio, Gtk, Pango  # noqa: E402
 
 from . import config  # noqa: E402
 from .config import config_dir  # noqa: E402
@@ -97,9 +97,23 @@ class Panel(Gtk.ApplicationWindow):
         self.confirm_box.set_visible(False)
         box.append(self.confirm_box)
 
+        # Image attachment row: button + chosen-file chips
+        self.attach_btn = Gtk.Button(label="🖼️ Attach image")
+        self.attach_btn.set_tooltip_text("Attach an image to your next message (vision models only)")
+        self.attach_btn.connect("clicked", self._on_attach_clicked)
+        self.attach_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.attach_row.set_hexpand(True)
+        self.attach_row.append(self.attach_btn)
+        self._attach_label = Gtk.Label(label="", xalign=0, ellipsize=Pango.EllipsizeMode.END)
+        self._attach_label.set_hexpand(True)
+        self.attach_row.append(self._attach_label)
+        box.append(self.attach_row)
+
         self.entry = Gtk.Entry(placeholder_text="Ask anything…")
         self.entry.connect("activate", self.on_submit)
         box.append(self.entry)
+
+        self._pending_images: list[str] = []
 
         # Cancel button (shown only while a turn is running)
         self.cancel_btn = Gtk.Button(label="Cancel")
@@ -147,6 +161,39 @@ class Panel(Gtk.ApplicationWindow):
         self.agent = Agent(self.cfg, self.key, self.toolbox)
         self.append(f"\n[model switched to: {model}]\n", "tool")
         self.entry.grab_focus()
+
+    def _on_attach_clicked(self, _btn):
+        dialog = Gtk.FileChooserNative(
+            title="Attach image",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+        filter_img = Gtk.FileFilter()
+        filter_img.set_name("Images")
+        for mime in ("image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"):
+            filter_img.add_mime_type(mime)
+        dialog.add_filter(filter_img)
+        filter_all = Gtk.FileFilter()
+        filter_all.set_name("All files")
+        filter_all.add_pattern("*")
+        dialog.add_filter(filter_all)
+
+        def on_response(dlg, response):
+            if response == Gtk.ResponseType.ACCEPT:
+                file = dlg.get_file()
+                if file is not None:
+                    path = file.get_path()
+                    if path:
+                        self._pending_images.append(path)
+                        name = pathlib.Path(path).name
+                        self._attach_label.set_text(
+                            (self._attach_label.get_text() + " • " if self._attach_label.get_text() else "")
+                            + name
+                        )
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.show()
 
     # -- UI helpers (main thread only)
 
@@ -227,16 +274,21 @@ class Panel(Gtk.ApplicationWindow):
             return
         if not text or self.busy or (not self.key and config.requires_api_key(self.cfg)):
             return
+        images = list(self._pending_images)
+        self._pending_images.clear()
+        self._attach_label.set_text("")
         entry.set_text("")
         self.busy = True
         self._cancel.clear()
         self.cancel_btn.set_visible(True)
         self.append("\nyou\n", "you")
         self.append_md(text)
+        if images:
+            self.append(f"\n[attached {len(images)} image(s)]\n", "tool")
         self.append("\n")
         self.append("\nai\n", "ai")
         self.store.append({"role": "user", "content": text})
-        threading.Thread(target=self.worker, args=(text, self._cancel), daemon=True).start()
+        threading.Thread(target=self.worker, args=(text, self._cancel, images), daemon=True).start()
 
     def reload_settings(self):
         """Re-read config.toml, hot-reload Python modules from disk, rebuild the agent, and refresh the UI.
@@ -304,14 +356,14 @@ class Panel(Gtk.ApplicationWindow):
         from .app import restart
         restart()
 
-    def worker(self, text, cancel):
+    def worker(self, text, cancel, images=None):
         def ui(fn, *a):
             GLib.idle_add(lambda: fn(*a) or False)
 
         msgs = self.store.messages()
         mark = len(msgs) - 1  # index of this turn's user message
         try:
-            self.agent.run_turn(msgs, cancel,
+            self.agent.run_turn(msgs, cancel, images=images,
                                 on_text=lambda t: ui(self.append_md, t),
                                 on_status=lambda s: ui(self.append, s, "tool"),
                                 on_pause=lambda r: self.confirm_pause(r))
