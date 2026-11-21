@@ -36,56 +36,6 @@ python assistant.py --print-config   # effective settings + the exact system pro
 python -m unittest discover -s ordis -t .
 ```
 
-## Config
-
-See `ordis/config.example.toml`. Bad or unknown settings are reported in the window and ignored, so a
-typo never stops it starting. Environment variables override the file: `ORDIS_API_KEY`,
-`ORDIS_MODEL`, `ORDIS_BASE_URL`, `ORDIS_FALLBACK_MODELS`. The legacy `NVIDIA_*` names still work as
-fallbacks. The API key itself never goes in `config.toml`. Run `python assistant.py --print-config`
-to see what actually took effect.
-
-**Base URL.** Any OpenAI-compatible API root works. A trailing `/` or a pasted `/chat/completions` is
-cleaned up (with a note); an unusable value falls back to the default with a warning. Plain
-`http://` to a non-local host warns that the key travels unencrypted. For a server on `localhost`
-(ollama, llama.cpp, vLLM) no API key is needed and none is sent.
-
-**System prompt.** Priority: `system_prompt_file` > `system_prompt` > the built-in default in
-`prompt.py`; `extra_system_prompt` is appended to whichever wins. These placeholders are filled in:
-`{tools} {date} {home} {app_dir} {config_file} {model}`. Other braces are left alone, so JSON in a
-prompt is safe. The file is re-read every turn, so you can tune the prompt without restarting; an
-unreadable or empty file warns once in the window and falls back.
-
-## Markdown
-
-Your messages and the model's replies are rendered as markdown: headings, **bold**, *italic*,
-~~strike~~, `inline code`, fenced code blocks, bullet/numbered lists (nested by 2-space indent),
-> quotes, `---` rules and [links](https://example.com) (shown as `text (url)`, not clickable).
-Tables are shown as monospace text. Single newlines stay line breaks. Replies are re-rendered as
-they stream in, so half-finished markup (`**bo`, an unclosed ```` ``` ````) shows literally for a
-moment, then snaps into place. Set `render_markdown = false` in `config.toml` to see raw text.
-The parser is `markdown.py`, the streaming logic `mdview.py`; the styles live in `ui.py`
-(`_create_markdown_tags`).
-
-Not supported: HTML, images, nested block quotes, bare-URL detection. Globs like `src/*/x_*.py`
-outside backticks can be mistaken for emphasis. Typing multi-line input (so you can write a fenced
-block yourself) needs a multi-line input box; the current one-line entry can't hold newlines.
-
-## niri keybind and window rule (Mod+A is free in your config)
-
-```kdl
-Mod+A hotkey-overlay-title="AI Assistant" { spawn "nix" "develop" "/home/qmil/Projects/assist" "-c" "python" "/home/qmil/Projects/assist/assistant.py"; }
-```
-
-Optional: open it floating in the bottom-right instead of as a tiled column.
-
-```kdl
-window-rule {
-    match app-id="^dev\\.local\\.Ordis$"
-    open-floating true
-    default-floating-position x=16 y=16 relative-to="bottom-right"
-}
-```
-
 ## Tools
 
 | Tool | Approval |
