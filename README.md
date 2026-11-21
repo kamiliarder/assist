@@ -1,5 +1,9 @@
 # ordis
 
+> [!WARNING]
+> AI Generated Code, PR's and fixes are welcome
+
+
 Chat assistant window for niri, talking to any OpenAI-compatible provider
 (NVIDIA NIM, Ollama, vLLM, llama.cpp, etc.).
 
