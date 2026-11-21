@@ -33,15 +33,14 @@
       };
 
       devShells.${system}.default = pkgs.mkShell {
-        # gobject-introspection's setup hook fills GI_TYPELIB_PATH from buildInputs
         nativeBuildInputs = [ pkgs.gobject-introspection ];
 
         buildInputs = [
           pyGui
           pyGui.pkgs.python-lsp-server
-          pyGui.pkgs.python-lsp-ruff  # Fast linting and formatting
-          pyGui.pkgs.pylsp-mypy       # Type checking
-          pyGui.pkgs.pylsp-rope       # Refactoring support
+          pyGui.pkgs.python-lsp-ruff
+          pyGui.pkgs.pylsp-mypy   
+          pyGui.pkgs.pylsp-rope       
           pkgs.gtk4
           pkgs.gtk4-layer-shell
           pkgs.glib
