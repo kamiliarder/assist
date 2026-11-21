@@ -20,22 +20,16 @@
     in
     {
       packages.${system} = {
-        ordis-core = pkgs.writeShellApplication rec {
-          name = "ordis-core";
-          runtimeInputs = [ pyCore ];
-          text = ''
-            exec ${pyCore}/bin/python /home/qmil/Projects/assist/ordis-core "$@"
-          '';
-        };
+        ordis-core = pkgs.writeShellScriptBin "ordis-core" ''
+          export PYTHONPATH="${./ordis}:${PYTHONPATH:-}"
+          exec ${pyCore}/bin/python "${./ordis-core}" "$@"
+        '';
 
-        ordis = pkgs.writeShellApplication rec {
-          name = "ordis";
-          runtimeInputs = [ pyGui pkgs.gtk4 pkgs.gtk4-layer-shell pkgs.glib pkgs.playerctl ];
-          text = ''
-            export GTK4_LAYER_SHELL_LIB=${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so
-            exec ${pyGui}/bin/python /home/qmil/Projects/assist/assistant.py "$@"
-          '';
-        };
+        ordis = pkgs.writeShellScriptBin "ordis" ''
+          export GTK4_LAYER_SHELL_LIB=${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so
+          export PYTHONPATH="${./ordis}:${PYTHONPATH:-}"
+          exec ${pyGui}/bin/python "${./assistant.py}" "$@"
+        '';
       };
 
       devShells.${system}.default = pkgs.mkShell {
