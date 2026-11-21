@@ -1,7 +1,7 @@
-# desk-ai
+# ordis
 
-Chat assistant window for niri, talking to NVIDIA NIM
-(`https://integrate.api.nvidia.com/v1`, OpenAI-compatible, with tool calling).
+Chat assistant window for niri, talking to any OpenAI-compatible provider
+(NVIDIA NIM, Ollama, vLLM, llama.cpp, etc.).
 
 A normal GTK4 window: niri can focus other windows while it stays open. Closing it hides it;
 running the program again brings it back.
@@ -9,8 +9,8 @@ running the program again brings it back.
 ## Layout
 
 ```
-desk_ai/
-  config.py   defaults < ~/.config/desk-ai/config.toml < environment; base_url checks
+ordis/
+  config.py   defaults < ~/.config/ordis/config.toml < environment; base_url checks
   prompt.py   system prompt: default, overrides, {placeholders}   (no GTK)
   llm.py      streaming client, retry/fallback, agent loop        (no GTK)
   tools/      the tools the model can call (one module per area), with approvals
@@ -26,25 +26,26 @@ assistant.py  thin shim so existing keybinds keep working
 git init && git add -A        # flakes only see tracked files
 direnv allow                  # or: nix develop
 
-mkdir -p ~/.config/desk-ai && install -m 600 /dev/null ~/.config/desk-ai/api_key
-$EDITOR ~/.config/desk-ai/api_key   # paste nvapi-... key
+mkdir -p ~/.config/ordis && install -m 600 /dev/null ~/.config/ordis/api_key
+$EDITOR ~/.config/ordis/api_key   # paste nvapi-... key
 
-cp desk_ai/config.example.toml ~/.config/desk-ai/config.toml   # optional
+cp ordis/config.example.toml ~/.config/ordis/config.toml   # optional
 
-python assistant.py                  # or: python -m desk_ai (from the project directory)
+python assistant.py                  # or: python -m ordis (from the project directory)
 python assistant.py --print-config   # effective settings + the exact system prompt, then exit
-python -m unittest discover -s desk_ai -t .
+python -m unittest discover -s ordis -t .
 ```
 
 ## Config
 
-See `desk_ai/config.example.toml`. Bad or unknown settings are reported in the window and ignored, so a
-typo never stops it starting. Environment variables override the file: `NVIDIA_API_KEY`,
-`NVIDIA_MODEL`, `NVIDIA_BASE_URL`, `NVIDIA_FALLBACK_MODELS`. The API key itself never goes in
-`config.toml`. Run `python assistant.py --print-config` to see what actually took effect.
+See `ordis/config.example.toml`. Bad or unknown settings are reported in the window and ignored, so a
+typo never stops it starting. Environment variables override the file: `ORDIS_API_KEY`,
+`ORDIS_MODEL`, `ORDIS_BASE_URL`, `ORDIS_FALLBACK_MODELS`. The legacy `NVIDIA_*` names still work as
+fallbacks. The API key itself never goes in `config.toml`. Run `python assistant.py --print-config`
+to see what actually took effect.
 
 **Base URL.** Any OpenAI-compatible API root works. A trailing `/` or a pasted `/chat/completions` is
-cleaned up (with a note); an unusable value falls back to the NVIDIA default with a warning. Plain
+cleaned up (with a note); an unusable value falls back to the default with a warning. Plain
 `http://` to a non-local host warns that the key travels unencrypted. For a server on `localhost`
 (ollama, llama.cpp, vLLM) no API key is needed and none is sent.
 
@@ -79,7 +80,7 @@ Optional: open it floating in the bottom-right instead of as a tiled column.
 
 ```kdl
 window-rule {
-    match app-id="^dev\\.local\\.DeskAI$"
+    match app-id="^dev\\.local\\.Ordis$"
     open-floating true
     default-floating-position x=16 y=16 relative-to="bottom-right"
 }

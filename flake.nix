@@ -1,5 +1,5 @@
 {
-  description = "desk-ai: a layer-shell AI assistant for niri, backed by NVIDIA NIM";
+  description = "ordis: a layer-shell AI assistant for niri, backed by NVIDIA NIM";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 

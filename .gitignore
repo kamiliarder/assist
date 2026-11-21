@@ -1,5 +1,5 @@
 __pycache__/
 .direnv/
-/desk_ai/tools/__pycache__
-/desk_ai/__pycache__
-/.direnv
+/ordis/tools/__pycache__
+/ordis/__pycache__
+.direnv

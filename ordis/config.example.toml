@@ -1,0 +1,39 @@
+# Copy to ~/.config/ordis/config.toml. Everything here is optional.
+# Environment variables (ORDIS_MODEL, ORDIS_BASE_URL, ORDIS_FALLBACK_MODELS, ORDIS_API_KEY)
+# override this file. Legacy NVIDIA_* names still work as fallbacks.
+# Check what actually took effect with:  python assistant.py --print-config
+
+# --- provider ---
+# base_url = "https://integrate.api.nvidia.com/v1"   # any OpenAI-compatible API root
+#   Local server (no API key needed on localhost), e.g. ollama:
+# base_url = "http://localhost:11434/v1"
+# model = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+# fallback_models = ["meta/llama-3.3-70b-instruct"]   # tried in order if the main model keeps failing
+# api_key_file = "~/.config/ordis/api_key"          # the key itself never goes in this file
+
+# --- system prompt ---
+# Priority: system_prompt_file > system_prompt > built-in default. extra_system_prompt is always appended.
+# skill_file is appended last (after extra_system_prompt). All are re-read every turn.
+# Placeholders filled in for you: {tools} {date} {home} {app_dir} {config_file} {model}
+# (anything else in braces is left as written).
+# system_prompt_file = "~/.config/ordis/system_prompt.md"   # re-read every turn: edit it live
+# system_prompt = "You are a terse assistant. Tools: {tools}."
+# extra_system_prompt = "Address me as qmil. Prefer short answers."
+# skill_file = "~/.config/ordis/SKILL.md"   # re-read every turn: edit it live
+
+# --- generation ---
+# temperature = 0.4
+# max_tokens = 4096     # includes the model's hidden reasoning; too low => blank or cut-off replies
+
+# --- behaviour ---
+# max_attempts = 4              # retries per model for 429/5xx/network errors
+# max_tool_rounds = 0           # 0 = no hard limit
+# tool_round_warn_every = 25    # pause and ask Resume/Stop every N tool runs (0 = never)
+# command_timeout = 30          # seconds, run_command
+# approval_timeout = 120        # seconds to wait for Allow/Deny
+
+# --- window ---
+# window_width = 460
+# window_height = 600
+# render_markdown = true        # false = show the raw text, markers and all
+# css_file = "~/.config/gtk-4.0/noctalia.css"  # user CSS file to load on startup/reload
