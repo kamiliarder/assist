@@ -329,6 +329,11 @@ class Panel(Gtk.ApplicationWindow, ClientCallbacks):
             self.client.command("switch_session", direction="previous", on_done=lambda r: self.append(
                 f"\n[{r['error']}]\n", "tool") if "error" in r else None)
             return
+        if text == "/new-session":
+            entry.set_text("")
+            self.client.command("new_session", on_done=lambda r: self.append(
+                f"\n[{r['error']}]\n", "tool") if "error" in r else None)
+            return
         snap = self.snap
         if not text or self.client.busy or (not snap.get("has_key") and snap.get("requires_key")):
             return

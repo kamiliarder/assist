@@ -401,6 +401,12 @@ class Server:
         threading.Thread(target=work, daemon=True).start()
         return _DEFERRED
 
+    def _cmd_new_session(self, conn, msg, reply):
+        self._require_idle()
+        view = self.core.new_session()
+        self.emit({"event": "history", "name": view["name"], "messages": view["messages"]})
+        return {"session": view["name"]}
+
     def _cmd_switch_session(self, conn, msg, reply):
         self._require_idle()
         prev = self.core.switch_session(msg.get("direction", "previous"))

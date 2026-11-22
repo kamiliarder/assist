@@ -120,6 +120,9 @@ class Core:
         if direction == "previous":
             return self.history.switch_previous()
         return None
+    def new_session(self) -> dict:
+        self.history.new_session()
+        return self.session_view()
 
     # -- read-only views for UIs -------------------------------------------
 
