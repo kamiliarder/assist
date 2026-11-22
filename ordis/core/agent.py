@@ -84,6 +84,8 @@ class Agent:
             if self._register_stream:
                 self._register_stream(r)
             try:
+                if cancel is not None and cancel.is_set():  # cancelled while connecting
+                    raise CancelledError("cancelled by user")
                 if r.status_code != 200:
                     r.read()
                     hint = {401: " (check your API key)",
@@ -162,10 +164,17 @@ class Agent:
         last = None
         for mi, model in enumerate(models):
             for attempt in range(1, self.cfg.max_attempts + 1):
+                if cancel is not None and cancel.is_set():
+                    raise CancelledError("cancelled by user")
                 state = {"started": False}
                 try:
                     return self._stream_once(model, messages, on_text, state, cancel, images=images)
+                except CancelledError:
+                    raise
                 except (ProviderError, httpx.TransportError) as e:
+                    if cancel is not None and cancel.is_set():
+                        # cancel() closed the stream under us: that's the cancel, not a network error
+                        raise CancelledError("cancelled by user") from e
                     retryable = e.retryable if isinstance(e, ProviderError) else True
                     if state["started"] or not retryable:
                         raise
@@ -177,7 +186,15 @@ class Agent:
                     reason = (str(e) or type(e).__name__)[:100]
                     on_status(f"\n… {reason}; retrying in {delay:.0f}s "
                               f"({attempt}/{self.cfg.max_attempts})\n")
-                    time.sleep(delay)
+                    if cancel is not None:
+                        if cancel.wait(delay):
+                            raise CancelledError("cancelled by user")
+                    else:
+                        time.sleep(delay)
+                except Exception as e:
+                    if cancel is not None and cancel.is_set():
+                        raise CancelledError("cancelled by user") from e  # e.g. httpx.StreamClosed
+                    raise
             if mi + 1 < len(models):
                 on_status(f"\n… switching to fallback model {models[mi + 1]}\n")
         if isinstance(last, httpx.TransportError):
@@ -192,6 +209,8 @@ class Agent:
                 on_status(f"\n⚠ {warning}\n")
         rounds = 0
         while True:
+            if cancel is not None and cancel.is_set():
+                raise CancelledError("cancelled by user")
             if self.cfg.max_tool_rounds and rounds >= self.cfg.max_tool_rounds:
                 on_text(f"\n(stopped after {rounds} tool rounds)\n")
                 return
@@ -200,7 +219,13 @@ class Agent:
             history.append(msg)
             if not msg.get("tool_calls"):
                 return
-            for tc in msg["tool_calls"]:
+            for ti, tc in enumerate(msg["tool_calls"]):
+                if cancel is not None and cancel.is_set():
+                    # every tool_call needs a reply or the next request to the provider is rejected
+                    for rest in msg["tool_calls"][ti:]:
+                        history.append({"role": "tool", "tool_call_id": rest["id"],
+                                        "content": "error: cancelled by the user before this tool ran"})
+                    raise CancelledError("cancelled by user")
                 name = tc["function"]["name"]
                 try:
                     args = json.loads(tc["function"]["arguments"] or "{}")

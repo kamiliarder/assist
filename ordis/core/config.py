@@ -52,7 +52,7 @@ class Config:
     history_dir: str = ""
 
     # socket API (optional)
-    socket_path: str = ""  # e.g. "~/.config/ordis/control.sock"
+    socket_path: str = ""  # empty -> $XDG_RUNTIME_DIR/ordis/control.sock (leave it empty under NixOS)
 
     # filled in by load(); not a setting
     warnings: list = field(default_factory=list)

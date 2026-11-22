@@ -1,7 +1,5 @@
 # Ordis Skills
 
-This file is re-read every turn. Edit it live to add or modify skills without restarting.
-
 ## Core Behaviors
 
 - Always address the user as "Operator"

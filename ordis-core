@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Headless ordis core daemon. Runs as a background service.
+"""Headless ordis core daemon. Owns the session and the model connection.
 
-Exposes a Unix socket API at ~/.config/ordis/control.sock (or configured
-socket_path) for UI clients to connect to.
+GUIs (`ordis`) attach over a Unix socket (see ordis/ipc). Under systemd it is socket-activated:
+the socket unit holds %t/ordis/control.sock and starts this on first use. Run by hand it binds
+the socket itself and refuses to start if another ordis-core is already answering there.
 """
 import os
 import pathlib
+import signal
 import sys
+import threading
 
 # Allow reading the API key from a file (e.g. mounted by sops-nix or agenix).
 key_file = os.environ.get("ORDIS_API_KEY_FILE") or os.environ.get("NVIDIA_API_KEY_FILE")
@@ -17,54 +20,37 @@ if key_file:
         pass
 
 from ordis.core import Core
-from ordis.core.config import config_dir, load
-from ordis.core.types import CoreCallbacks
-
-
-class NoopCallbacks(CoreCallbacks):
-    """Headless core has no UI; callbacks are no-ops."""
-
-    def on_text(self, text: str) -> None:
-        pass
-
-    def on_status(self, status: str) -> None:
-        pass
-
-    def on_pause(self, rounds: int) -> bool:
-        return True
-
-    def confirm(self, text: str) -> bool:
-        # No UI to ask; deny by default for safety
-        return False
-
-    def on_finish(self) -> None:
-        pass
+from ordis.core.config import load
+from ordis.ipc.protocol import resolve_socket_path
+from ordis.ipc.server import AlreadyRunning, Server, activation_socket, bind_socket
 
 
 def main():
     cfg = load()
-    socket_path = cfg.socket_path or str(config_dir() / "control.sock")
+    path = resolve_socket_path(cfg.socket_path)
 
-    core = Core(callbacks=NoopCallbacks())
+    listener = activation_socket()
+    owned = listener is None
+    try:
+        if listener is None:
+            listener = bind_socket(path)
+    except AlreadyRunning as e:
+        print(f"ordis-core: {e}", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"ordis core running on {socket_path}", file=sys.stderr)
+    core = Core()
+    server = Server(core, listener, path=path, owned=owned)
+    stop = threading.Event()
+    server.on_shutdown = stop.set
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
 
-    # Keep the process alive
-    import signal
-    import time
+    server.start()
+    print(f"ordis-core listening on {path}"
+          f"{' (socket-activated)' if not owned else ''}", file=sys.stderr, flush=True)
+    stop.wait()
 
-    stop = False
-
-    def handle_signal(signum, frame):
-        nonlocal stop
-        stop = True
-
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGINT, handle_signal)
-
-    while not stop:
-        time.sleep(1)
-
+    server.stop()   # cancels any turn, which closes the model connection
     core.shutdown()
 
 

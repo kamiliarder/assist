@@ -15,18 +15,41 @@ closing the chat window as needed.
 ## Architecture
 
 ```
-ordis-core  (systemd user service)
-  └─ listens on ~/.config/ordis/control.sock
+ordis-core  (systemd user service, socket-activated)
+  owns: the session, history, tools, and the one connection to the model
+  listens on $XDG_RUNTIME_DIR/ordis/control.sock   (mode 0600, same-uid only)
 
 ordis       (GTK4 window, launched on demand)
-  └─ connects to ordis-core via socket API
+  holds no session: attaches to ordis-core, shows the live stream, sends commands
 ```
+
+Closing the window ends the GUI process only. A running turn keeps going in the daemon, and the
+next window attaches to it (including mid-turn). Stopping the daemon ends the session and its
+model connection.
+
+Cancel (and `kill`, the same thing) sets the cancel flag *and* closes the HTTP stream, so the
+provider connection really goes away and the agent does not retry it.
+
+Approvals (run_command, file edits, tool-round pauses) are asked of whichever GUI is attached.
+With no GUI attached they are denied.
+
+### Control from a shell
+
+```sh
+ordis --ctl status      # busy? model? uptime? attached GUIs
+ordis --ctl cancel      # stop the running turn and drop the model connection ("kill" is an alias)
+ordis --ctl reload      # re-read config.toml
+ordis --ctl shutdown    # stop the daemon
+```
+
+Protocol: newline-delimited JSON over the socket, see `ordis/ipc/protocol.py`.
 
 ## Layout
 
 ```
 ordis/
   core/         headless daemon logic (config, agent, toolbox, history, prompt, tools, types)
+  ipc/          socket protocol, daemon-side server, client library
   ui/           GTK4 client (panel, app, mdview)
   markdown.py   markdown parser
   config.example.toml   example config
@@ -58,8 +81,8 @@ window_height = 600
 render_markdown = true
 css_file = "~/.config/gtk-4.0/noctalia.css"
 
-# socket (for ordis-core)
-socket_path = "~/.config/ordis/control.sock"
+# socket: leave unset (default $XDG_RUNTIME_DIR/ordis/control.sock; the NixOS socket unit uses it)
+# socket_path = "/some/other/path.sock"
 ```
 
 Environment variables: `ORDIS_BASE_URL`, `ORDIS_MODEL`, `ORDIS_API_KEY`,
@@ -77,11 +100,9 @@ $EDITOR ~/.config/ordis/api_key   # paste nvapi-... key
 
 cp ordis/config.example.toml ~/.config/ordis/config.toml   # optional
 
-# GUI client
-python assistant.py
-
-# Headless core daemon
+# Headless core daemon (first), then the GUI client
 python ordis-core
+python assistant.py
 
 # Check effective settings
 python assistant.py --print-config
@@ -93,8 +114,9 @@ python -m unittest discover -s ordis -t .
 ### NixOS
 
 See `/home/qmil/nixos/modules/features/ordis.nix` for the NixOS module.
-It installs `ordis-core` as a systemd user service and `ordis` as a GUI client
-available via `Mod+A` in niri. API key is managed via agenix.
+It installs `ordis-core` as a socket-activated systemd user service and `ordis` as a GUI client
+available via `Mod+A` in niri. API key is managed via agenix. The daemon's PATH comes from the
+module's `extraPath` option, not from your shell.
 
 ## SKILL.md
 

@@ -1,4 +1,8 @@
-"""GTK4 Application entry point: thin wrapper over Core + Panel."""
+"""GTK4 Application entry point: a thin client of ordis-core.
+
+The session lives in the daemon, so closing the window really closes this process and the
+conversation is still there next time.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,11 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, Gtk
+from gi.repository import Gdk, GLib, Gio, Gtk
 
-from ... import core
+from ...core.config import load
+from ...ipc.client import CoreClient
+from ...ipc.protocol import resolve_socket_path
 from .panel import Panel, CSS as PanelCSS
 
 
@@ -19,7 +25,22 @@ class App(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="dev.local.Ordis")
         self.panel = None
-        self.core_instance = None
+        self.client = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+
+        # Reload settings: <Ctrl>R or /reload in the entry.
+        reload_action = Gio.SimpleAction.new("reload", None)
+        reload_action.connect("activate", lambda _a, _p: self.panel and self.panel.reload())
+        self.add_action(reload_action)
+        self.set_accels_for_action("app.reload", ["<Ctrl>R"])
+
+        # Restart this GUI process (the session is untouched: it lives in ordis-core).
+        restart_action = Gio.SimpleAction.new("restart", None)
+        restart_action.connect("activate", lambda _a, _p: restart())
+        self.add_action(restart_action)
+        self.set_accels_for_action("app.restart", ["<Ctrl><Shift>R"])
 
     def do_activate(self):
         if self.panel is None:
@@ -28,35 +49,18 @@ class App(Gtk.Application):
             Gtk.StyleContext.add_provider_for_display(
                 Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-            self.core_instance = core.Core(callbacks=None)
-            self.panel = Panel(self, self.core_instance)
-            self.panel.present()
-            self.panel.entry.grab_focus()
+            self.client = CoreClient(
+                resolve_socket_path(load().socket_path),
+                marshal=lambda fn: GLib.idle_add(lambda: fn() or False))
+            self.panel = Panel(self, self.client)
 
         self.panel.present()
         self.panel.entry.grab_focus()
 
-    def _do_reload(self):
-        self.core_instance.reload_config()
-        self.panel._initial_render()
-        self.panel.entry.grab_focus()
-
-        # Reload settings: <Ctrl>R or /reload in the entry.
-        action = Gio.SimpleAction.new("reload", None)
-        action.connect("activate", lambda _a, _p: self._do_reload())
-        self.add_action(action)
-        self.set_accels_for_action("app.reload", ["<Ctrl>R"])
-
-        # Full process restart.
-        restart_action = Gio.SimpleAction.new("restart", None)
-        restart_action.connect("activate", lambda _a, _p: restart())
-        self.add_action(restart_action)
-        self.set_accels_for_action("app.restart", ["<Ctrl><Shift>R"])
-
 
 def restart():
     entry_point = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "assistant.py")
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "assistant.py")
     )
     os.execv(sys.executable, [sys.executable, entry_point])
 

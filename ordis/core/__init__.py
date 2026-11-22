@@ -1,19 +1,17 @@
 """Core orchestrator: business logic with zero UI widget dependencies.
 
-The Core owns config, history, toolbox, agent, and the worker thread.
-UIs (GTK, Slint, TUI, ...) implement CoreCallbacks and drive Core.
+The Core owns config, history, toolbox, agent, and the worker thread. It lives in exactly one
+place, the ordis-core daemon; UIs reach it through ordis.ipc (see ordis/ipc/server.py).
 """
 
 from __future__ import annotations
 
-import json
-import os
-import socket
 import threading
 import time
 
 from . import agent as agent_module
-from .config import Config, config_dir, load, load_api_key
+from .agent import Agent  # noqa: F401  (re-exported)
+from .config import Config, fetch_models, load, load_api_key, requires_api_key
 from .history import HistoryStore
 from .prompt import clear_skill_cache
 from .toolbox import Toolbox
@@ -21,121 +19,57 @@ from .types import CoreCallbacks
 
 
 class Core:
-    def __init__(self, callbacks: CoreCallbacks, marshal=None):
-        """`marshal(fn)` schedules `fn` on the UI main thread. Defaults to calling directly."""
+    def __init__(self, callbacks: CoreCallbacks | None = None, marshal=None):
+        """`marshal(fn)` schedules `fn` on a UI thread. Defaults to calling directly (daemon)."""
         self.callbacks = callbacks
         self._marshal = marshal or (lambda fn: fn())
         self.cfg: Config = load()
         self.key = load_api_key(self.cfg)
         self.history = HistoryStore(self.cfg.history_enabled, self.cfg.history_dir)
+        # looked up lazily, so replacing `callbacks` later (the server does) keeps working
         self.toolbox = Toolbox(lambda text: self.callbacks.confirm(text), self.cfg.command_timeout)
-        self.agent = agent_module.Agent(self.cfg, self.key, self.toolbox,
-                                        register_stream=self._register_stream,
-                                        unregister_stream=self._unregister_stream)
+        self.agent = self._make_agent()
 
+        self._lock = threading.Lock()
         self._busy = False
         self._cancel = threading.Event()
         self._worker_thread: threading.Thread | None = None
-        self._socket_server: socket.socket | None = None
-        self._socket_thread: threading.Thread | None = None
-        self._socket_path = self.cfg.socket_path if hasattr(self.cfg, 'socket_path') and self.cfg.socket_path else None
-        self._active_stream: object | None = None  # httpx stream response for kill switch
+        self._active_stream: object | None = None  # httpx response, so cancel can close it
         self._stream_lock = threading.Lock()
-        self._start_socket_server()
         self._start_time = time.time()
 
-    def _start_socket_server(self):
-        if not self._socket_path:
-            return
-        # Clean up any stale socket
-        try:
-            os.unlink(self._socket_path)
-        except OSError:
-            pass
-        self._socket_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._socket_server.bind(self._socket_path)
-        self._socket_server.listen(5)
-        self._socket_thread = threading.Thread(target=self._socket_loop, daemon=True)
-        self._socket_thread.start()
+    def _make_agent(self) -> agent_module.Agent:
+        return agent_module.Agent(self.cfg, self.key, self.toolbox,
+                                  register_stream=self._register_stream,
+                                  unregister_stream=self._unregister_stream)
 
-    def _socket_loop(self):
-        while True:
-            try:
-                conn, _ = self._socket_server.accept()
-                self._handle_connection(conn)
-            except OSError:
-                break  # socket closed
+    # -- stream registry (so cancel can drop the model connection) --------
 
-    def _handle_connection(self, conn):
-        try:
-            data = conn.recv(4096).decode().strip()
-            if not data:
-                return
-            cmd = json.loads(data)
-            response = self._handle_command(cmd)
-            conn.sendall(json.dumps(response).encode())
-        except json.JSONDecodeError:
-            conn.sendall(json.dumps({"error": "invalid JSON"}).encode())
-        except Exception as e:
-            conn.sendall(json.dumps({"error": str(e)}).encode())
-        finally:
-            conn.close()
+    def _register_stream(self, stream: object) -> None:
+        with self._stream_lock:
+            self._active_stream = stream
 
-    def _handle_command(self, cmd: dict) -> dict:
-        action = cmd.get("action")
-        if action == "kill":
-            self._kill_stream()
-            return {"status": "ok", "message": "stream killed"}
-        elif action == "status":
-            return {
-                "status": "ok",
-                "busy": self._busy,
-                "model": self.cfg.model,
-                "uptime_sec": int(time.time() - self._start_time),
-            }
-        elif action == "healthcheck":
-            return {"status": "healthy", "busy": self._busy}
-        elif action == "reload":
-            self.reload_config()
-            return {"status": "ok", "message": "config reloaded"}
-        else:
-            return {"error": f"unknown action: {action}"}
-
-    def shutdown(self):
-        if self._socket_server:
-            self._socket_server.close()
-        if self._socket_path:
-            try:
-                os.unlink(self._socket_path)
-            except OSError:
-                pass
+    def _unregister_stream(self) -> None:
+        with self._stream_lock:
+            self._active_stream = None
 
     def _kill_stream(self) -> None:
-        """Force-close the active HTTP stream to kill the AI connection immediately."""
+        """Force-close the active HTTP stream so the provider connection really goes away."""
         with self._stream_lock:
             stream = self._active_stream
         if stream is not None:
             try:
                 stream.close()
             except Exception:
-                pass  # stream may already be closed
-
-    def _register_stream(self, stream: object) -> None:
-        """Register the active HTTP stream so kill can close it."""
-        with self._stream_lock:
-            self._active_stream = stream
-
-    def _unregister_stream(self) -> None:
-        """Clear the active stream reference when the turn ends."""
-        with self._stream_lock:
-            self._active_stream = None
+                pass  # already closed
 
     # -- lifecycle ---------------------------------------------------------
 
-    def send_message(self, text: str, images: list[str] | None = None) -> None:
-        if self._busy:
-            return
-        self._busy = True
+    def send_message(self, text: str, images: list[str] | None = None) -> bool:
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
         self._cancel.clear()
         if images:
             self._marshal(lambda: self.callbacks.on_status(f"\n[attached {len(images)} image(s)]\n"))
@@ -144,26 +78,70 @@ class Core:
         self._worker_thread = threading.Thread(
             target=self._worker, args=(text, images), daemon=True)
         self._worker_thread.start()
+        return True
 
     def cancel(self) -> None:
+        """Stop the running turn and drop the model connection now (not at the next chunk).
+
+        The flag goes first so a retry loop that sees the dropped stream gives up instead of
+        reconnecting.
+        """
         self._cancel.set()
+        self._kill_stream()
+
+    kill = cancel
+
+    def shutdown(self) -> None:
+        self.cancel()
+        t = self._worker_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=3)
+        self.history.save()
 
     def reload_config(self) -> None:
-        new_cfg = load()
-        new_key = load_api_key(new_cfg)
-        self.cfg = new_cfg
-        self.key = new_key
-        self.toolbox = Toolbox(self.callbacks.confirm, new_cfg.command_timeout)
-        self.agent = agent_module.Agent(new_cfg, new_key, self.toolbox,
-                                        register_stream=self._register_stream,
-                                        unregister_stream=self._unregister_stream)
-        self.history = HistoryStore(new_cfg.history_enabled, new_cfg.history_dir)
+        old = self.cfg
+        self.cfg = load()
+        self.key = load_api_key(self.cfg)
+        self.toolbox = Toolbox(lambda text: self.callbacks.confirm(text), self.cfg.command_timeout)
+        self.agent = self._make_agent()
+        if (self.cfg.history_enabled, self.cfg.history_dir) != (old.history_enabled, old.history_dir):
+            self.history = HistoryStore(self.cfg.history_enabled, self.cfg.history_dir)
         clear_skill_cache()
+
+    def set_model(self, model: str) -> None:
+        self.cfg.model = model
+        self.agent = self._make_agent()
+
+    def list_models(self) -> list[str]:
+        key = self.key if requires_api_key(self.cfg) else None
+        return fetch_models(self.cfg.base_url, key=key)
 
     def switch_session(self, direction: str) -> dict | None:
         if direction == "previous":
             return self.history.switch_previous()
         return None
+
+    # -- read-only views for UIs -------------------------------------------
+
+    def snapshot(self) -> dict:
+        cfg = self.cfg
+        cur = self.history.current
+        return {
+            "model": cfg.model,
+            "base_url": cfg.base_url,
+            "has_key": bool(self.key),
+            "requires_key": requires_api_key(cfg),
+            "warnings": list(cfg.warnings),
+            "approval_timeout": cfg.approval_timeout,
+            "busy": self._busy,
+            "session": cur.name if cur else None,
+            "uptime_sec": int(time.time() - self._start_time),
+        }
+
+    def session_view(self) -> dict:
+        cur = self.history.current
+        return {"name": cur.name if cur else None,
+                "messages": list(cur.messages) if cur else []}
 
     # -- worker thread -----------------------------------------------------
 
@@ -191,13 +169,9 @@ class Core:
         finally:
             self._marshal(lambda: self.callbacks.on_text("\n"))
             self.history.save()
-            self._busy = False
+            with self._lock:
+                self._busy = False
             self._marshal(self.callbacks.on_finish)
-
-    # -- approval flow -----------------------------------------------------
-
-    def confirm(self, text: str) -> bool:
-        return self.callbacks.confirm(text)
 
     # -- properties --------------------------------------------------------
 

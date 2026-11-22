@@ -1,20 +1,17 @@
-"""The chat window: thin GTK4 UI layer over Core."""
+"""The chat window: a GTK4 view over ordis-core (via ordis.ipc). Holds no session state."""
 
 from __future__ import annotations
 
-import json
 import os
 import pathlib
-import socket
-import threading
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, Gio, Gtk, Pango
 
-from ... import core
-from ...core.config import config_dir
+from ...core.config import load as load_config
+from ...ipc.client import ClientCallbacks, CoreClient
 from .mdview import MarkdownWriter
 
 CSS = b"""
@@ -38,24 +35,19 @@ def _load_user_css(css_file: str) -> Gtk.CssProvider | None:
         return None
 
 
-class Panel(Gtk.ApplicationWindow):
-    def __init__(self, app, core_instance: core.Core):
+class Panel(Gtk.ApplicationWindow, ClientCallbacks):
+    def __init__(self, app, client: CoreClient):
         super().__init__(application=app, title="ordis")
         self.app = app
-        self.core = core_instance
-        core_instance.callbacks = self  # register as the callback target
-        core_instance._marshal = lambda fn: GLib.idle_add(lambda: fn() or False)
-
-        self.busy = False
-        self.store = core_instance.history
-        self.toolbox = core_instance.toolbox
-        self.agent = core_instance.agent
-
-        self._cancel = core_instance._cancel
-        self._pending = None
+        self.client = client
+        client.callbacks = self
+        self.cfg = load_config()      # window/markdown/css settings are the GUI's own
+        self.snap: dict = {}          # what the daemon told us: model, key state, warnings
+        self._pending_request = None  # id of the approval the daemon is waiting on
         self._pending_images: list[str] = []
+        self._ever_connected = False
 
-        self.set_default_size(core_instance.cfg.window_width, core_instance.cfg.window_height)
+        self.set_default_size(self.cfg.window_width, self.cfg.window_height)
         self.connect("close-request", self.on_close)
 
         # Load built-in CSS
@@ -65,7 +57,7 @@ class Panel(Gtk.ApplicationWindow):
             Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
         # Load user CSS if configured (higher priority so it can override)
-        self._user_css_provider = _load_user_css(core_instance.cfg.css_file)
+        self._user_css_provider = _load_user_css(self.cfg.css_file)
         if self._user_css_provider:
             Gtk.StyleContext.add_provider_for_display(
                 Gdk.Display.get_default(), self._user_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
@@ -143,48 +135,88 @@ class Panel(Gtk.ApplicationWindow):
         self.cancel_btn = Gtk.Button(label="Cancel")
         self.cancel_btn.add_css_class("destructive-action")
         self.cancel_btn.set_visible(False)
-        self.cancel_btn.connect("clicked", lambda _b: self.core.cancel())
+        self.cancel_btn.connect("clicked", lambda _b: self.client.cancel())
         box.append(self.cancel_btn)
 
-        # Kill connection button (force kill the AI stream)
-        self.kill_btn = Gtk.Button(label="Kill Connection")
-        self.kill_btn.add_css_class("destructive-action")
-        self.kill_btn.set_tooltip_text("Force terminate the AI connection (socket API)")
-        self.kill_btn.connect("clicked", lambda _b: self._kill_connection())
-        box.append(self.kill_btn)
-
-        # Healthcheck indicator
+        # Connection indicator: are we attached to ordis-core?
         self.health_label = Gtk.Label(label="●", xalign=1)
         self.health_label.add_css_class("dim")
-        self.health_label.set_tooltip_text("AI connection health")
+        self.health_label.set_tooltip_text("ordis-core connection")
         box.append(self.health_label)
 
-        self._initial_render()
+        self._set_health_indicator(False)
+        client.start()
 
     def _initial_render(self):
-        cfg = self.core.cfg
-        key = self.core.key
-        self.append(f"model: {cfg.model} @ {cfg.base_url}\n", "tool")
-        for w in cfg.warnings:
+        snap = self.snap
+        if not snap:
+            return
+        self.append(f"model: {snap.get('model')} @ {snap.get('base_url')}\n", "tool")
+        for w in snap.get("warnings", []):
             self.append(f"config: {w}\n", "err")
-        if not key and self._requires_api_key(cfg):
-            self.append("No API key. Set ORDIS_API_KEY (or NVIDIA_API_KEY) or put it in ~/.config/ordis/api_key\n", "err")
+        if not snap.get("has_key") and snap.get("requires_key"):
+            self.append("No API key in ordis-core. Set ORDIS_API_KEY (or the agenix key file) "
+                        "or put it in ~/.config/ordis/api_key, then /reload\n", "err")
 
     def _reload_user_css(self):
         """Reload user CSS from config file."""
         if self._user_css_provider:
             Gtk.StyleContext.remove_provider_for_display(
                 Gdk.Display.get_default(), self._user_css_provider)
-        self._user_css_provider = _load_user_css(self.core.cfg.css_file)
+        self._user_css_provider = _load_user_css(self.cfg.css_file)
         if self._user_css_provider:
             Gtk.StyleContext.add_provider_for_display(
                 Gdk.Display.get_default(), self._user_css_provider, Gtk.STYLE_PROVIDER_PRIORITY_USER)
 
-    def _requires_api_key(self, cfg):
-        from ...core.config import requires_api_key
-        return requires_api_key(cfg)
+    def reload(self):
+        """GUI settings are re-read here; the daemon re-reads its own."""
+        self.cfg = load_config()
+        self._reload_user_css()
+        self.client.command("reload", on_done=lambda r: self.append(
+            f"\n[reload failed: {r['error']}]\n", "err") if "error" in r else None)
+        self.entry.grab_focus()
 
-    # -- CoreCallbacks implementation -------------------------------------
+    # -- ClientCallbacks (all on the GTK main thread) ---------------------
+
+    def on_connection(self, connected, snapshot):
+        self._set_health_indicator(connected)
+        if connected:
+            self._ever_connected = True
+            self._apply_snapshot(snapshot)
+        elif self._ever_connected:
+            self.append("\n[lost connection to ordis-core; reconnecting…]\n", "err")
+            self.cancel_btn.set_visible(False)
+            self._hide_confirm()
+        else:
+            self.append("\n[ordis-core isn't answering. Start it with: "
+                        "systemctl --user start ordis-core  (retrying…)]\n", "err")
+
+    def on_snapshot(self, snapshot):
+        self._apply_snapshot(snapshot)
+        self._initial_render()
+
+    def on_history(self, name, messages):
+        self.md.close()
+        self.buf.set_text("")
+        self._initial_render()
+        self.append(f"[session: {name}, {len(messages)} messages]\n", "tool")
+        for m in messages:
+            role = m.get("role", "?")
+            content = m.get("content") or ""
+            if role == "user":
+                self.append("\nyou\n", "you")
+                self.append_md(content if isinstance(content, str) else str(content))
+            elif role == "assistant" and content:
+                self.append(f"\nai\n{content}\n", "ai")
+            elif role == "tool":
+                first = content.splitlines()[0] if content else ""
+                self.append(f"\n→ {first[:200]}\n", "tool")
+        self.append("")
+
+    def on_user(self, text, images):
+        self.append("\nyou\n", "you")
+        self.append_md(text)
+        self.cancel_btn.set_visible(True)
 
     def on_text(self, text: str) -> None:
         if text == "\nai\n":
@@ -197,28 +229,38 @@ class Panel(Gtk.ApplicationWindow):
 
     def on_finish(self) -> None:
         self.cancel_btn.set_visible(False)
+        self._hide_confirm()
         self.entry.grab_focus()
 
-    def on_pause(self, rounds: int) -> bool:
-        return self.confirm_pause(rounds)
+    def on_confirm(self, request_id, kind, text, extra):
+        pause = kind == "pause"
+        self.allow_btn.set_label("Resume" if pause else "Allow")
+        self.deny_btn.set_label("Stop" if pause else "Deny")
+        self.confirm_label.set_text(text if pause else f"Run this command?\n\n{text}")
+        self.confirm_box.set_visible(True)
+        self._pending_request = request_id
+        self.present()
 
-    def confirm(self, text: str) -> bool:
-        ev, box = threading.Event(), {"ok": False}
+    def on_confirm_done(self, request_id):
+        if request_id == self._pending_request:
+            self._hide_confirm()
 
-        def show():
-            self.allow_btn.set_label("Allow")
-            self.deny_btn.set_label("Deny")
-            self.confirm_label.set_text(f"Run this command?\n\n{text}")
-            self.confirm_box.set_visible(True)
-            self._pending = (ev, box)
-            self.present()
-            return False
+    def on_error(self, text):
+        self.append(f"\n[{text}]\n", "err")
 
-        GLib.idle_add(show)
-        if not ev.wait(self.core.cfg.approval_timeout):
-            GLib.idle_add(lambda: self._answer(False) or False)
-            ev.wait(5)
-        return box["ok"]
+    def _apply_snapshot(self, snap):
+        self.snap = snap or {}
+        model = self.snap.get("model")
+        for i in range(self._model_store.get_n_items()):
+            if self._model_store.get_string(i) == model:
+                self.model_dropdown.handler_block(self._model_changed_handler)
+                self.model_dropdown.set_selected(i)
+                self.model_dropdown.handler_unblock(self._model_changed_handler)
+                break
+
+    def _hide_confirm(self):
+        self._pending_request = None
+        self.confirm_box.set_visible(False)
 
     # -- UI helpers (main thread only) ------------------------------------
 
@@ -261,23 +303,22 @@ class Panel(Gtk.ApplicationWindow):
         self._scroll_end()
 
     def append_md(self, text):
-        if self.core.cfg.render_markdown:
+        if self.cfg.render_markdown:
             self.md.write(text)
         else:
             self.append(text)
 
     def on_close(self, _win):
-        self.set_visible(False)
-        return True
+        # The session lives in ordis-core, so closing the window can really end this process.
+        self.client.close()
+        self.app.quit()
+        return False
 
     def on_submit(self, entry):
         text = entry.get_text().strip()
         if text == "/reload":
             entry.set_text("")
-            self.core.reload_config()
-            self._initial_render()
-            self._reload_user_css()
-            self.entry.grab_focus()
+            self.reload()
             return
         if text == "/restart":
             entry.set_text("")
@@ -285,59 +326,36 @@ class Panel(Gtk.ApplicationWindow):
             return
         if text == "/prev-session":
             entry.set_text("")
-            prev = self.core.switch_session("previous")
-            if prev is None:
-                self.append("\n[no previous session]\n", "tool")
-            else:
-                self.append(f"\n[switched to session: {prev['name']}]\n", "tool")
-                self.append(f"({len(prev['messages'])} messages)\n", "tool")
-                for m in prev["messages"]:
-                    role = m.get("role", "?")
-                    content = m.get("content") or ""
-                    if role == "user":
-                        self.append(f"\nyou\n{content}\n", "you")
-                    elif role == "assistant":
-                        self.append(f"\nai\n{content}\n", "ai")
-                    elif role == "tool":
-                        self.append(f"\n[tool result] {content}\n", "tool")
-                self.store.save()
+            self.client.command("switch_session", direction="previous", on_done=lambda r: self.append(
+                f"\n[{r['error']}]\n", "tool") if "error" in r else None)
             return
-        if not text or self.core.busy or (not self.core.key and self._requires_api_key(self.core.cfg)):
+        snap = self.snap
+        if not text or self.client.busy or (not snap.get("has_key") and snap.get("requires_key")):
             return
         images = list(self._pending_images)
         self._pending_images.clear()
         self._attach_label.set_text("")
         entry.set_text("")
-        self.append("\nyou\n", "you")
-        self.append_md(text)
-        self.core.send_message(text, images=images)
-        self.cancel_btn.set_visible(True)
+        self.client.send_message(text, images=images)  # the daemon echoes it back as an event
+
     def _load_models(self):
-        key = self.core.key if self._requires_api_key(self.core.cfg) else None
-        from ...core.config import fetch_models
-        models = fetch_models(self.core.cfg.base_url, key=key)
-        self._model_store.splice(0, self._model_store.get_n_items(), models)
-        if models:
-            try:
-                idx = models.index(self.core.cfg.model)
-            except ValueError:
-                idx = -1
-            if idx >= 0:
-                self.model_dropdown.handler_block(self._model_changed_handler)
-                self.model_dropdown.set_selected(idx)
-                self.model_dropdown.handler_unblock(self._model_changed_handler)
-        self.append(f"\n[models] {len(models)} available from {self.core.cfg.base_url}\n", "tool")
+        def done(reply):
+            models = reply.get("models") or []
+            self._model_store.splice(0, self._model_store.get_n_items(), models)
+            self._apply_snapshot(self.snap)
+            self.append(f"\n[models] {len(models)} available from {self.snap.get('base_url')}\n", "tool")
+        self.client.command("list_models", on_done=done)
 
     def _on_model_changed(self, dropdown, _pspec):
         idx = dropdown.get_selected()
         if idx < 0:
             return
         model = self._model_store.get_string(idx)
-        if model == self.core.cfg.model:
+        if model == self.snap.get("model"):
             return
-        self.core.cfg.model = model
-        self.core.agent = core.Agent(self.core.cfg, self.core.key, self.core.toolbox)
-        self.append(f"\n[model switched to: {model}]\n", "tool")
+        self.client.command("set_model", model=model, on_done=lambda r: self.append(
+            f"\n[{r['error']}]\n", "err") if "error" in r else self.append(
+            f"\n[model switched to: {model}]\n", "tool"))
         self.entry.grab_focus()
 
     def _on_attach_clicked(self, _btn):
@@ -374,81 +392,21 @@ class Panel(Gtk.ApplicationWindow):
         dialog.show()
 
     def _answer(self, ok):
-        if self._pending is None:
+        if self._pending_request is None:
             return
-        ev, box = self._pending
-        self._pending = None
-        box["ok"] = ok
-        self.confirm_box.set_visible(False)
-        ev.set()
-
-    def confirm_pause(self, rounds):
-        ev, box = threading.Event(), {"ok": False}
-
-        def show():
-            self.allow_btn.set_label("Resume")
-            self.deny_btn.set_label("Stop")
-            self.confirm_label.set_text(
-                f"{rounds} tools have run this turn. Resume or stop?")
-            self.confirm_box.set_visible(True)
-            self._pending = (ev, box)
-            self.present()
-            return False
-
-        GLib.idle_add(show)
-        if not ev.wait(self.core.cfg.approval_timeout):
-            GLib.idle_add(lambda: self._answer(False) or False)
-            ev.wait(5)
-        GLib.idle_add(lambda: (self.allow_btn.set_label("Allow"),
-                               self.deny_btn.set_label("Deny")) or False)
-        return box["ok"]
+        self.client.answer(self._pending_request, ok)
+        self._hide_confirm()
 
     def restart(self):
-        self.append("\n[restarting ordis...]\n", "tool")
-        if self.store.current is not None:
-            marker = config_dir() / ".resume_session"
-            marker.write_text(self.store.current.name)
+        self.append("\n[restarting the GUI; your session stays in ordis-core]\n", "tool")
+        self.client.close()
         from .app import restart
         restart()
-
-    def _kill_connection(self):
-        """Force kill the AI connection via socket API."""
-        if not self.core.cfg.socket_path:
-            self.append("\n[no socket configured; set socket_path in config.toml]\n", "err")
-            return
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            sock.connect(os.path.expanduser(self.core.cfg.socket_path))
-            sock.sendall(b'{"action": "kill"}')
-            resp = sock.recv(1024)
-            sock.close()
-            self.append(f"\n[kill sent: {resp.decode().strip()}]\n", "tool")
-        except Exception as e:
-            self.append(f"\n[kill failed: {e}]\n", "err")
-
-    def _update_health(self):
-        """Periodic healthcheck via socket."""
-        if not self.core.cfg.socket_path:
-            return False  # stop timer
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            sock.connect(os.path.expanduser(self.core.cfg.socket_path))
-            sock.sendall(b'{"action": "healthcheck"}')
-            resp = sock.recv(1024)
-            sock.close()
-            data = json.loads(resp.decode())
-            healthy = data.get("status") == "healthy"
-            GLib.idle_add(lambda: self._set_health_indicator(healthy))
-        except Exception:
-            GLib.idle_add(lambda: self._set_health_indicator(False))
-        return True  # continue timer
 
     def _set_health_indicator(self, healthy: bool):
         if healthy:
             self.health_label.set_markup('<span color="green">●</span>')
-            self.health_label.set_tooltip_text("AI connection: healthy")
+            self.health_label.set_tooltip_text("attached to ordis-core")
         else:
             self.health_label.set_markup('<span color="red">●</span>')
-            self.health_label.set_tooltip_text("AI connection: unavailable")
+            self.health_label.set_tooltip_text("ordis-core unavailable")
