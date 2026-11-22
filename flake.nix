@@ -44,7 +44,7 @@
             pkgs.gtk4
             pkgs.gtk4-layer-shell
             pkgs.glib
-            pkgs.pa # PortAudio for sounddevice microphone recording
+            pkgs.portaudio # PortAudio for sounddevice microphone recording
           ];
 
           dontConfigure = true;
