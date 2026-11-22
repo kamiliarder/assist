@@ -5,42 +5,83 @@
 
   outputs =
     { self, nixpkgs }:
-    let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      let
+        system = "x86_64-linux";
+        pkgs = nixpkgs.legacyPackages.${system};
+        lib = pkgs.lib;
 
-      pyCore = pkgs.python3.withPackages (ps: [
-        ps.httpx # streaming HTTP to the API
-      ]);
+        py = pkgs.python3.withPackages (ps: [
+          ps.pygobject3 # GTK4 bindings (the core's app launcher imports gi too)
+          ps.httpx
+        ]);
 
-      pyGui = pkgs.python3.withPackages (ps: [
-        ps.pygobject3 # GTK4 and layer-shell bindings
-        ps.httpx # streaming HTTP to the API
-      ]);
-    in
-    {
-      packages.${system} = {
-        ordis-core = pkgs.writeShellScriptBin "ordis-core" ''
-          export PYTHONPATH="${./ordis}:${PYTHONPATH:-}"
-          exec ${pyCore}/bin/python "${./ordis-core}" "$@"
-        '';
+        # Everything goes into the store together, so `ordis/` sits next to the
+        # entry scripts and `import ordis` works. Only these paths: .env and
+        # other stray files stay out of the world-readable store.
+        src = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./assistant.py
+            ./ordis-core
+            ./ordis
+          ];
+        };
 
-        ordis = pkgs.writeShellScriptBin "ordis" ''
-          export GTK4_LAYER_SHELL_LIB=${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so
-          export PYTHONPATH="${./ordis}:${PYTHONPATH:-}"
-          exec ${pyGui}/bin/python "${./assistant.py}" "$@"
-        '';
-      };
+        ordis = pkgs.stdenv.mkDerivation {
+          pname = "ordis";
+          version = "0.1.0";
+          inherit src;
+
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+            pkgs.wrapGAppsHook4
+            pkgs.gobject-introspection
+          ];
+          buildInputs = [
+            pkgs.gtk4
+            pkgs.gtk4-layer-shell
+            pkgs.glib
+          ];
+
+          dontConfigure = true;
+          dontBuild = true;
+
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out/lib/ordis $out/bin
+            cp -r assistant.py ordis-core ordis $out/lib/ordis/
+            makeWrapper ${py}/bin/python $out/bin/ordis \
+              --add-flags $out/lib/ordis/assistant.py
+            makeWrapper ${py}/bin/python $out/bin/ordis-core \
+              --add-flags $out/lib/ordis/ordis-core
+            runHook postInstall
+          '';
+
+          # wrapGAppsHook4 adds the GTK typelibs; these are the extras
+          preFixup = ''
+            gappsWrapperArgs+=(
+              --set GTK4_LAYER_SHELL_LIB ${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so
+              --prefix PATH : ${lib.makeBinPath [ pkgs.playerctl ]}
+            )
+          '';
+        };
+      in
+      {
+        packages.${system} = {
+          default = ordis;
+          inherit ordis;
+          ordis-core = ordis; # one package, two programs: bin/ordis and bin/ordis-core
+        };
 
       devShells.${system}.default = pkgs.mkShell {
         nativeBuildInputs = [ pkgs.gobject-introspection ];
 
         buildInputs = [
-          pyGui
-          pyGui.pkgs.python-lsp-server
-          pyGui.pkgs.python-lsp-ruff
-          pyGui.pkgs.pylsp-mypy   
-          pyGui.pkgs.pylsp-rope       
+          py
+          py.pkgs.python-lsp-server
+          py.pkgs.python-lsp-ruff
+          py.pkgs.pylsp-mypy
+          py.pkgs.pylsp-rope
           pkgs.gtk4
           pkgs.gtk4-layer-shell
           pkgs.glib
