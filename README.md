@@ -113,7 +113,7 @@ python -m unittest discover -s ordis -t .
 
 ### NixOS
 
-See `/home/qmil/nixos/modules/features/ordis.nix` for the NixOS module.
+See `my own nixos configuration on ordis.nix` for the NixOS module.
 It installs `ordis-core` as a socket-activated systemd user service and `ordis` as a GUI client
 available via `Mod+A` in niri. API key is managed via agenix. The daemon's PATH comes from the
 module's `extraPath` option, not from your shell.
@@ -146,3 +146,4 @@ with backoff, then `fallback_models` are tried in order.
 - `/reload` — re-read config.toml and clear skill cache
 - `/restart` — full process restart
 - `/prev-session` — switch to previous chat session
+- `/new` — start a new session
