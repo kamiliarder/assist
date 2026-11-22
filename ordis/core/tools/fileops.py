@@ -76,7 +76,7 @@ def validate_syntax(path, text):
 
 
 class FileOps:
-    def __init__(self, roots, confirm=None, rewrite_max_lines=50, max_bytes=512_000,
+    def __init__(self, roots, confirm=None, rewrite_max_lines=300, max_bytes=512_000,
                  readonly_prefixes=("/nix/store/",), protected_paths=None):
         self.roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
         self.confirm = confirm
