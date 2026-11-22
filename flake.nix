@@ -13,6 +13,9 @@
         py = pkgs.python3.withPackages (ps: [
           ps.pygobject3 # GTK4 bindings (the core's app launcher imports gi too)
           ps.httpx
+          ps.faster-whisper # speech-to-text (local, runs on CPU)
+          ps.sounddevice # microphone recording
+          ps.numpy # audio arrays for faster-whisper
         ]);
 
         # Everything goes into the store together, so `ordis/` sits next to the
@@ -41,6 +44,7 @@
             pkgs.gtk4
             pkgs.gtk4-layer-shell
             pkgs.glib
+            pkgs.pa # PortAudio for sounddevice microphone recording
           ];
 
           dontConfigure = true;

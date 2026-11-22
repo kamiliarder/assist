@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import threading
 
 import gi
 
@@ -13,6 +14,17 @@ from gi.repository import Gdk, GLib, Gio, Gtk, Pango
 from ...core.config import load as load_config
 from ...ipc.client import ClientCallbacks, CoreClient
 from .mdview import MarkdownWriter
+
+# Speech-to-text (lazy import so the UI still opens if deps are missing)
+try:
+    import numpy as np
+    import sounddevice as sd
+    from faster_whisper import WhisperModel
+    _STT_AVAILABLE = True
+except Exception:
+    _STT_AVAILABLE = False
+
+_STT_MODEL = None
 
 CSS = b"""
 textview, textview text { font-size: 14px; }
@@ -128,9 +140,25 @@ class Panel(Gtk.ApplicationWindow, ClientCallbacks):
         self.attach_row.append(self._attach_label)
         box.append(self.attach_row)
 
+        # Entry row: text input + mic button
+        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.entry = Gtk.Entry(placeholder_text="Ask anything…")
         self.entry.connect("activate", self.on_submit)
-        box.append(self.entry)
+        self.entry.set_hexpand(True)
+        entry_row.append(self.entry)
+
+        self.mic_btn = Gtk.ToggleButton(label="🎙️")
+        self.mic_btn.set_tooltip_text("Hold to speak (push-to-talk). Release to transcribe.")
+        self.mic_btn.set_hexpand(False)
+        self.mic_btn.connect("toggled", self._on_mic_toggled)
+        entry_row.append(self.mic_btn)
+        box.append(entry_row)
+
+        # Push-to-talk keybind: <Ctrl>Space
+        ptt_action = Gio.SimpleAction.new("ptt", None)
+        ptt_action.connect("activate", lambda _a, _p: self._ptt_activate())
+        self.add_action(ptt_action)
+        self.set_accels_for_action("win.ptt", ["<Ctrl>space"])
 
         self.cancel_btn = Gtk.Button(label="Cancel")
         self.cancel_btn.add_css_class("destructive-action")
@@ -343,6 +371,97 @@ class Panel(Gtk.ApplicationWindow, ClientCallbacks):
         self._attach_label.set_text("")
         entry.set_text("")
         self.client.send_message(text, images=images)  # the daemon echoes it back as an event
+
+    # -- Speech-to-text (push-to-talk) ------------------------------------
+
+    def _stt_model(self):
+        global _STT_MODEL
+        if _STT_MODEL is None:
+            _STT_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+        return _STT_MODEL
+
+    def _on_mic_toggled(self, btn):
+        if not _STT_AVAILABLE:
+            self.append("\n[Speech-to-text not available: install faster-whisper, sounddevice, numpy]\n", "err")
+            btn.set_active(False)
+            return
+        if btn.get_active():
+            self._start_recording()
+        else:
+            self._stop_and_transcribe()
+
+    def _ptt_activate(self):
+        """Keybind <Ctrl>Space: press = start recording, release = transcribe."""
+        # Gtk.ToggleButton doesn't expose press/release cleanly via actions,
+        # so we toggle on each keypress: first press starts, second stops.
+        self.mic_btn.set_active(not self.mic_btn.get_active())
+
+    def _start_recording(self):
+        if self.client.busy:
+            self.append("\n[ordis is busy; try again in a moment]\n", "err")
+            self.mic_btn.set_active(False)
+            return
+        self.append("\n[recording… release the mic button or <Ctrl>Space to stop]\n", "tool")
+        self._rec_frames = []
+        self._rec_stop = threading.Event()
+
+        def loop():
+            try:
+                fs = 16000
+                with sd.InputStream(samplerate=fs, channels=1, dtype="float32") as stream:
+                    while not self._rec_stop.is_set():
+                        data, _ = stream.read(int(fs * 0.1))  # 100ms chunks
+                        self._rec_frames.append(data.copy())
+            except Exception as e:
+                GLib.idle_add(lambda: self._mic_error(f"microphone error: {e}"))
+                return
+            GLib.idle_add(self._finish_recording)
+
+        self._rec_thread = threading.Thread(target=loop, daemon=True)
+        self._rec_thread.start()
+
+    def _finish_recording(self):
+        if not self._rec_frames:
+            self.append("\n[nothing recorded]\n", "tool")
+            return
+        audio = np.concatenate(self._rec_frames, axis=0)
+        audio = np.squeeze(audio).astype(np.float32)
+
+        import tempfile, wave
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = pathlib.Path(tmp.name)
+        try:
+            with wave.open(str(tmp_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                pcm = (audio * 32767).astype(np.int16)
+                wf.writeframes(pcm.tobytes())
+
+            model = self._stt_model()
+            segments, _ = model.transcribe(str(tmp_path), vad_filter=True)
+            text = " ".join(seg.text for seg in segments).strip()
+            if text:
+                self.entry.set_text(text)
+                self.append(f"\nyou (voice)\n{text}\n", "you")
+            else:
+                self.append("\n[no speech detected]\n", "tool")
+        except Exception as e:
+            self.append(f"\n[transcription failed: {e}]\n", "err")
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+    def _stop_and_transcribe(self):
+        self._rec_stop.set()
+        if hasattr(self, "_rec_thread"):
+            self._rec_thread.join(timeout=5)
+
+    def _mic_error(self, text):
+        self.append(f"\n[{text}]\n", "err")
+        self.mic_btn.set_active(False)
 
     def _load_models(self):
         def done(reply):

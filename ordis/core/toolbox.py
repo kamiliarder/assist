@@ -2,7 +2,7 @@
 
 import pathlib
 
-from .tools import apps, command, fileops, media, obsidian, web, windows
+from .tools import apps, command, fileops, find_file, media, obsidian, stt, web, windows
 from .tools.env import _run
 
 from .tools.env import LEAKY_ENV  # noqa: F401  (re-exported for backwards compatibility)
@@ -56,6 +56,8 @@ class Toolbox:
             "web_tavily_extract": self.web_tavily_extract,
             "web_tavily_search_and_extract": self.web_tavily_search_and_extract,
             "obsidian": self.obsidian,
+            "find_file": self.find_file,
+            "speech_to_text": self.speech_to_text,
         })
         self.schemas.extend([
             _tool("list_windows", "List open windows (id, title, app_id)."),
@@ -131,15 +133,32 @@ class Toolbox:
                    "vault": {"type": "string",
                              "description": "Optional vault name to target"}},
                   ["command"]),
+            _tool("find_file",
+                  "Search for files by name (fd) or by content (ripgrep). Auto-approved; no confirmation required.",
+                  {"pattern": {"type": "string"},
+                   "path": {"type": "string",
+                            "description": "Directory to search in. Defaults to home."},
+                   "content": {"type": "boolean",
+                               "description": "If true, search file contents with ripgrep; otherwise search filenames with fd."},
+                   "max_results": {"type": "integer",
+                                   "description": "Maximum number of results to return."}},
+                  ["pattern"]),
+            _tool("speech_to_text",
+                  "Record from the microphone and transcribe with faster-whisper. Auto-approved.",
+                  {"duration": {"type": "number",
+                                "description": "Seconds to record (1-60, default 10)"},
+                   "language": {"type": "string",
+                                "description": "Optional language code (e.g. 'en', 'id'). None = auto-detect"}},
+                  []),
         ])
 
     def _bind_methods(self):
         import pathlib
-        for mod in (windows, apps, media, command, obsidian):
+        for mod in (windows, apps, media, command, obsidian, find_file, stt):
             for name in ("list_windows", "focus_window", "open_app", "media", "run_command",
                          "focus_workspace_down", "focus_workspace_up", "focus_workspace",
                          "focus_workspace_previous", "center_window", "fullscreen_window",
-                         "switch_preset_window_width", "obsidian"):
+                         "switch_preset_window_width", "obsidian", "find_file", "speech_to_text"):
                 fn = getattr(mod, name, None)
                 if fn is not None:
                     setattr(self, name, fn.__get__(self, Toolbox))
