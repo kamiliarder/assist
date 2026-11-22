@@ -29,7 +29,9 @@ class Core:
         self.key = load_api_key(self.cfg)
         self.history = HistoryStore(self.cfg.history_enabled, self.cfg.history_dir)
         self.toolbox = Toolbox(lambda text: self.callbacks.confirm(text), self.cfg.command_timeout)
-        self.agent = agent_module.Agent(self.cfg, self.key, self.toolbox)
+        self.agent = agent_module.Agent(self.cfg, self.key, self.toolbox,
+                                        register_stream=self._register_stream,
+                                        unregister_stream=self._unregister_stream)
 
         self._busy = False
         self._cancel = threading.Event()
@@ -37,6 +39,8 @@ class Core:
         self._socket_server: socket.socket | None = None
         self._socket_thread: threading.Thread | None = None
         self._socket_path = self.cfg.socket_path if hasattr(self.cfg, 'socket_path') and self.cfg.socket_path else None
+        self._active_stream: object | None = None  # httpx stream response for kill switch
+        self._stream_lock = threading.Lock()
         self._start_socket_server()
         self._start_time = time.time()
 
@@ -80,8 +84,8 @@ class Core:
     def _handle_command(self, cmd: dict) -> dict:
         action = cmd.get("action")
         if action == "kill":
-            self.cancel()
-            return {"status": "ok", "message": "cancel signal sent"}
+            self._kill_stream()
+            return {"status": "ok", "message": "stream killed"}
         elif action == "status":
             return {
                 "status": "ok",
@@ -105,6 +109,26 @@ class Core:
                 os.unlink(self._socket_path)
             except OSError:
                 pass
+
+    def _kill_stream(self) -> None:
+        """Force-close the active HTTP stream to kill the AI connection immediately."""
+        with self._stream_lock:
+            stream = self._active_stream
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass  # stream may already be closed
+
+    def _register_stream(self, stream: object) -> None:
+        """Register the active HTTP stream so kill can close it."""
+        with self._stream_lock:
+            self._active_stream = stream
+
+    def _unregister_stream(self) -> None:
+        """Clear the active stream reference when the turn ends."""
+        with self._stream_lock:
+            self._active_stream = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -130,7 +154,9 @@ class Core:
         self.cfg = new_cfg
         self.key = new_key
         self.toolbox = Toolbox(self.callbacks.confirm, new_cfg.command_timeout)
-        self.agent = agent_module.Agent(new_cfg, new_key, self.toolbox)
+        self.agent = agent_module.Agent(new_cfg, new_key, self.toolbox,
+                                        register_stream=self._register_stream,
+                                        unregister_stream=self._unregister_stream)
         self.history = HistoryStore(new_cfg.history_enabled, new_cfg.history_dir)
         clear_skill_cache()
 

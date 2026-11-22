@@ -30,11 +30,13 @@ class ProviderError(Exception):
 
 
 class Agent:
-    def __init__(self, cfg, key, toolbox):
+    def __init__(self, cfg, key, toolbox, register_stream=None, unregister_stream=None):
         self.cfg = cfg
         self.key = key
         self.toolbox = toolbox
         self._prompt_warning = None
+        self._register_stream = register_stream
+        self._unregister_stream = unregister_stream
 
     @property
     def system(self):
@@ -79,52 +81,58 @@ class Agent:
         timeout = httpx.Timeout(30.0, read=120.0)
         with httpx.stream("POST", f"{self.cfg.base_url}/chat/completions", json=payload,
                           headers=headers, timeout=timeout) as r:
-            if r.status_code != 200:
-                r.read()
-                hint = {401: " (check your API key)",
-                        404: f" (model '{model}' not found, or wrong base_url {self.cfg.base_url}?)"}.get(r.status_code, "")
-                ra = r.headers.get("retry-after", "")
-                raise ProviderError(
-                    f"HTTP {r.status_code}{hint}: {r.text[:300]}",
-                    retryable=r.status_code in RETRY_STATUS,
-                    retry_after=float(ra) if ra.replace(".", "", 1).isdigit() else None,
-                )
-            for line in r.iter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    saw_done = True
-                    break
-                if cancel is not None and cancel.is_set():
-                    raise CancelledError("cancelled by user")
-                chunk = json.loads(data)
-                if chunk.get("error") and not chunk.get("choices"):
-                    err = chunk["error"]
-                    detail = err.get("message") if isinstance(err, dict) else err
-                    raise ProviderError(f"provider error mid-stream: {detail}", retryable=True)
-                if not chunk.get("choices"):
-                    continue
-                choice = chunk["choices"][0]
-                finish = choice.get("finish_reason") or finish
-                delta = choice.get("delta") or {}
-                if delta.get("reasoning_content") or delta.get("reasoning"):
-                    saw_reasoning = True
-                if delta.get("content"):
-                    state["started"] = True
-                    content += delta["content"]
-                    on_text(delta["content"])
-                for tc in delta.get("tool_calls") or []:
-                    state["started"] = True
-                    c = calls.setdefault(tc.get("index", 0), {
-                        "id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                    if tc.get("id"):
-                        c["id"] = tc["id"]
-                    fn = tc.get("function") or {}
-                    if fn.get("name"):
-                        c["function"]["name"] += fn["name"]
-                    if fn.get("arguments"):
-                        c["function"]["arguments"] += fn["arguments"]
+            if self._register_stream:
+                self._register_stream(r)
+            try:
+                if r.status_code != 200:
+                    r.read()
+                    hint = {401: " (check your API key)",
+                            404: f" (model '{model}' not found, or wrong base_url {self.cfg.base_url}?)"}.get(r.status_code, "")
+                    ra = r.headers.get("retry-after", "")
+                    raise ProviderError(
+                        f"HTTP {r.status_code}{hint}: {r.text[:300]}",
+                        retryable=r.status_code in RETRY_STATUS,
+                        retry_after=float(ra) if ra.replace(".", "", 1).isdigit() else None,
+                    )
+                for line in r.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        saw_done = True
+                        break
+                    if cancel is not None and cancel.is_set():
+                        raise CancelledError("cancelled by user")
+                    chunk = json.loads(data)
+                    if chunk.get("error") and not chunk.get("choices"):
+                        err = chunk["error"]
+                        detail = err.get("message") if isinstance(err, dict) else err
+                        raise ProviderError(f"provider error mid-stream: {detail}", retryable=True)
+                    if not chunk.get("choices"):
+                        continue
+                    choice = chunk["choices"][0]
+                    finish = choice.get("finish_reason") or finish
+                    delta = choice.get("delta") or {}
+                    if delta.get("reasoning_content") or delta.get("reasoning"):
+                        saw_reasoning = True
+                    if delta.get("content"):
+                        state["started"] = True
+                        content += delta["content"]
+                        on_text(delta["content"])
+                    for tc in delta.get("tool_calls") or []:
+                        state["started"] = True
+                        c = calls.setdefault(tc.get("index", 0), {
+                            "id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                        if tc.get("id"):
+                            c["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            c["function"]["name"] += fn["name"]
+                        if fn.get("arguments"):
+                            c["function"]["arguments"] += fn["arguments"]
+            finally:
+                if self._unregister_stream:
+                    self._unregister_stream()
         if os.environ.get("ORDIS_DEBUG"):
             print(f"[ordis] model={model} finish={finish} content_chars={len(content)} "
                   f"tool_calls={len(calls)} reasoning={saw_reasoning} done={saw_done}",
