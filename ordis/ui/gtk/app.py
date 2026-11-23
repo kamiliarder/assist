@@ -42,6 +42,12 @@ class App(Gtk.Application):
         self.add_action(restart_action)
         self.set_accels_for_action("app.restart", ["<Ctrl><Shift>R"])
 
+        # Push-to-talk: <Ctrl>Space toggles the mic button in the panel.
+        ptt_action = Gio.SimpleAction.new("ptt", None)
+        ptt_action.connect("activate", lambda _a, _p: self.panel and self.panel._ptt_activate())
+        self.add_action(ptt_action)
+        self.set_accels_for_action("app.ptt", ["<Ctrl>space"])
+
     def do_activate(self):
         if self.panel is None:
             provider = Gtk.CssProvider()

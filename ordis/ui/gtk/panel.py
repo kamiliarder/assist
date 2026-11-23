@@ -9,7 +9,7 @@ import threading
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, GLib, Gio, Gtk, Pango
+from gi.repository import Gdk, GLib, Gtk, Pango
 
 from ...core.config import load as load_config
 from ...ipc.client import ClientCallbacks, CoreClient
@@ -129,7 +129,8 @@ class Panel(Gtk.ApplicationWindow, ClientCallbacks):
         box.append(self.confirm_box)
 
         # Image attachment row
-        self.attach_btn = Gtk.Button(label="🖼️ Attach image")
+        self.attach_btn = Gtk.Button()
+        self.attach_btn.set_child(Gtk.Image.new_from_icon_name("image-x-generic"))
         self.attach_btn.set_tooltip_text("Attach an image to your next message (vision models only)")
         self.attach_btn.connect("clicked", self._on_attach_clicked)
         self.attach_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -147,18 +148,15 @@ class Panel(Gtk.ApplicationWindow, ClientCallbacks):
         self.entry.set_hexpand(True)
         entry_row.append(self.entry)
 
-        self.mic_btn = Gtk.ToggleButton(label="🎙️")
+        self.mic_btn = Gtk.ToggleButton()
+        self.mic_btn.set_child(Gtk.Image.new_from_icon_name("audio-input-microphone"))
         self.mic_btn.set_tooltip_text("Hold to speak (push-to-talk). Release to transcribe.")
         self.mic_btn.set_hexpand(False)
         self.mic_btn.connect("toggled", self._on_mic_toggled)
         entry_row.append(self.mic_btn)
         box.append(entry_row)
 
-        # Push-to-talk keybind: <Ctrl>Space
-        ptt_action = Gio.SimpleAction.new("ptt", None)
-        ptt_action.connect("activate", lambda _a, _p: self._ptt_activate())
-        self.add_action(ptt_action)
-        self.set_accels_for_action("win.ptt", ["<Ctrl>space"])
+        # Push-to-talk keybind: <Ctrl>Space (accel registered on the app as app.ptt)
 
         self.cancel_btn = Gtk.Button(label="Cancel")
         self.cancel_btn.add_css_class("destructive-action")
@@ -444,6 +442,7 @@ class Panel(Gtk.ApplicationWindow, ClientCallbacks):
             if text:
                 self.entry.set_text(text)
                 self.append(f"\nyou (voice)\n{text}\n", "you")
+                self.on_submit(self.entry)  # auto-send the transcription
             else:
                 self.append("\n[no speech detected]\n", "tool")
         except Exception as e:
